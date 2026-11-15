@@ -17,3 +17,14 @@ android-app/local.properties
 
 # Python
 __pycache__/
+
+# Release signing (never commit; back these up)
+android-app/keystore.properties
+*.jks
+*.keystore
+
+# Archify review evidence (the final diagram + receipts stay tracked)
+.archify/**/visual-check/
+.archify/**/review-*/
+.archify/**/*.json
+!.archify/**/candidate.json

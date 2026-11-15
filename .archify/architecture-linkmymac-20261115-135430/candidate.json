@@ -1,0 +1,505 @@
+{
+  "schema_version": 1,
+  "diagram_type": "architecture",
+  "meta": {
+    "title": "LinkMyMac architecture",
+    "output": ".archify/architecture-linkmymac-20261115-135430/linkmymac.html",
+    "quality_profile": "showcase",
+    "locale": "en",
+    "repository": {
+      "url": "https://github.com/rohitrathia2/linkmymac.git",
+      "provider": "github",
+      "link_mode": "web",
+      "revision": "bda802b3f5620fc3d45645accf3f83c70d30bd1c"
+    }
+  },
+  "components": [
+    {
+      "id": "mac_ui",
+      "type": "frontend",
+      "label": "UniBridge app",
+      "sublabel": "SwiftUI · menu bar",
+      "pos": [
+        40,
+        300
+      ],
+      "size": [
+        150,
+        64
+      ],
+      "sources": [
+        {
+          "path": "macos-app/Sources/LinkMyMac/LinkMyMacApp.swift",
+          "line": 184,
+          "end_line": 200,
+          "label": "Dashboard sections"
+        },
+        {
+          "path": "macos-app/Sources/LinkMyMac/LinkMyMacApp.swift",
+          "line": 725,
+          "end_line": 760,
+          "label": "Photos / Videos gallery"
+        },
+        {
+          "path": "macos-app/Sources/LinkMyMac/LinkMyMacApp.swift",
+          "line": 1911,
+          "end_line": 1960,
+          "label": "Preview sheet with VideoPlayer"
+        }
+      ]
+    },
+    {
+      "id": "mac_stream",
+      "type": "backend",
+      "label": "MediaStreamLoader",
+      "sublabel": "AVPlayer byte ranges",
+      "pos": [
+        30,
+        110
+      ],
+      "size": [
+        170,
+        64
+      ],
+      "sources": [
+        {
+          "path": "macos-app/Sources/LinkMyMac/MediaStreamLoader.swift",
+          "line": 19,
+          "end_line": 44,
+          "label": "Resource loader + AVPlayer"
+        },
+        {
+          "path": "macos-app/Sources/LinkMyMac/MediaStreamLoader.swift",
+          "line": 63,
+          "end_line": 82,
+          "label": "One phone range per loading request"
+        }
+      ]
+    },
+    {
+      "id": "mac_client",
+      "type": "backend",
+      "label": "MacP2PClient",
+      "sublabel": "connect · auth · transfers",
+      "pos": [
+        280,
+        300
+      ],
+      "size": [
+        170,
+        64
+      ],
+      "sources": [
+        {
+          "path": "macos-app/Sources/LinkMyMac/MacP2PClient.swift",
+          "line": 264,
+          "end_line": 290,
+          "label": "Bonjour discovery"
+        },
+        {
+          "path": "macos-app/Sources/LinkMyMac/MacP2PClient.swift",
+          "line": 963,
+          "end_line": 1052,
+          "label": "Answer challenge, verify phone"
+        },
+        {
+          "path": "macos-app/Sources/LinkMyMac/MacP2PClient.swift",
+          "line": 1261,
+          "end_line": 1300,
+          "label": "Send files with backpressure"
+        }
+      ]
+    },
+    {
+      "id": "mac_secrets",
+      "type": "database",
+      "label": "UserDefaults",
+      "sublabel": "secret per phone",
+      "pos": [
+        280,
+        490
+      ],
+      "size": [
+        170,
+        64
+      ],
+      "sources": [
+        {
+          "path": "macos-app/Sources/LinkMyMac/MacP2PClient.swift",
+          "line": 1055,
+          "end_line": 1069,
+          "label": "Pairing secret per phoneId"
+        }
+      ]
+    },
+    {
+      "id": "gate",
+      "type": "security",
+      "label": "Pairing gate",
+      "sublabel": "code + ECDH · HMAC proofs",
+      "pos": [
+        640,
+        300
+      ],
+      "size": [
+        170,
+        64
+      ],
+      "sources": [
+        {
+          "path": "android-app/src/main/java/com/linkmymac/android/service/P2PDaemonService.kt",
+          "line": 491,
+          "end_line": 495,
+          "label": "Drop frames until authenticated"
+        },
+        {
+          "path": "android-app/src/main/java/com/linkmymac/android/crypto/PairingManager.kt",
+          "line": 84,
+          "end_line": 127,
+          "label": "Proof or single-use code"
+        },
+        {
+          "path": "android-app/src/main/java/com/linkmymac/android/crypto/PairingManager.kt",
+          "line": 129,
+          "end_line": 145,
+          "label": "ECDH-derived secret"
+        }
+      ]
+    },
+    {
+      "id": "phone_secrets",
+      "type": "database",
+      "label": "SharedPreferences",
+      "sublabel": "secret per Mac",
+      "pos": [
+        640,
+        490
+      ],
+      "size": [
+        170,
+        64
+      ],
+      "sources": [
+        {
+          "path": "android-app/src/main/java/com/linkmymac/android/crypto/PairingManager.kt",
+          "line": 84,
+          "end_line": 127,
+          "label": "Read / store secret per Mac"
+        }
+      ]
+    },
+    {
+      "id": "daemon",
+      "type": "backend",
+      "label": "P2PDaemonService",
+      "sublabel": "foreground service · router",
+      "pos": [
+        925,
+        290
+      ],
+      "size": [
+        180,
+        84
+      ],
+      "sources": [
+        {
+          "path": "android-app/src/main/java/com/linkmymac/android/service/P2PDaemonService.kt",
+          "line": 317,
+          "end_line": 338,
+          "label": "ServerSocket on 8765"
+        },
+        {
+          "path": "android-app/src/main/java/com/linkmymac/android/service/P2PDaemonService.kt",
+          "line": 352,
+          "end_line": 366,
+          "label": "Advertise _linkmymac._tcp"
+        },
+        {
+          "path": "android-app/src/main/java/com/linkmymac/android/service/P2PDaemonService.kt",
+          "line": 432,
+          "end_line": 440,
+          "label": "AUTH_CHALLENGE on connect"
+        }
+      ]
+    },
+    {
+      "id": "media",
+      "type": "database",
+      "label": "MediaStore",
+      "sublabel": "photos · videos · Download",
+      "pos": [
+        1240,
+        300
+      ],
+      "size": [
+        170,
+        64
+      ],
+      "sources": [
+        {
+          "path": "android-app/src/main/java/com/linkmymac/android/service/MediaStoreProvider.kt",
+          "line": 81,
+          "end_line": 130,
+          "label": "Gallery pages by mediaType"
+        },
+        {
+          "path": "android-app/src/main/java/com/linkmymac/android/service/P2PDaemonService.kt",
+          "line": 766,
+          "end_line": 798,
+          "label": "Video byte-range streaming"
+        },
+        {
+          "path": "android-app/src/main/java/com/linkmymac/android/service/P2PDaemonService.kt",
+          "line": 800,
+          "end_line": 823,
+          "label": "Save Mac files to Download"
+        }
+      ]
+    },
+    {
+      "id": "phone_app",
+      "type": "frontend",
+      "label": "LinkMyMac (Android)",
+      "sublabel": "pairing code · share target",
+      "pos": [
+        925,
+        110
+      ],
+      "size": [
+        180,
+        64
+      ],
+      "sources": [
+        {
+          "path": "android-app/src/main/java/com/linkmymac/android/ui/MainActivity.kt",
+          "line": 177,
+          "end_line": 193,
+          "label": "Single-use pairing code"
+        },
+        {
+          "path": "android-app/src/main/java/com/linkmymac/android/ui/MainActivity.kt",
+          "line": 195,
+          "end_line": 220,
+          "label": "Share sheet to Mac"
+        }
+      ]
+    },
+    {
+      "id": "notifications",
+      "type": "backend",
+      "label": "Notification listener",
+      "sublabel": "mirror + quick reply",
+      "pos": [
+        1240,
+        110
+      ],
+      "size": [
+        170,
+        64
+      ],
+      "sources": [
+        {
+          "path": "android-app/src/main/java/com/linkmymac/android/service/LMMNotificationListener.kt",
+          "line": 198,
+          "end_line": 250,
+          "label": "Mirror posted notifications"
+        },
+        {
+          "path": "android-app/src/main/java/com/linkmymac/android/service/LMMNotificationListener.kt",
+          "line": 287,
+          "end_line": 330,
+          "label": "Quick reply via RemoteInput"
+        }
+      ]
+    },
+    {
+      "id": "clipboard",
+      "type": "backend",
+      "label": "Clipboard sync",
+      "sublabel": "SHA-256 dedup",
+      "pos": [
+        850,
+        490
+      ],
+      "size": [
+        150,
+        64
+      ],
+      "sources": [
+        {
+          "path": "android-app/src/main/java/com/linkmymac/android/service/ClipboardSyncHelper.kt",
+          "line": 93,
+          "end_line": 112,
+          "label": "Phone clipboard to Mac"
+        },
+        {
+          "path": "android-app/src/main/java/com/linkmymac/android/service/ClipboardSyncHelper.kt",
+          "line": 134,
+          "end_line": 155,
+          "label": "Apply Mac clipboard"
+        }
+      ]
+    },
+    {
+      "id": "camera",
+      "type": "backend",
+      "label": "Camera stream",
+      "sublabel": "camera2 JPEG frames",
+      "pos": [
+        1030,
+        490
+      ],
+      "size": [
+        160,
+        64
+      ],
+      "sources": [
+        {
+          "path": "android-app/src/main/java/com/linkmymac/android/service/CameraStreamProvider.kt",
+          "line": 457,
+          "end_line": 500,
+          "label": "JPEG frames broadcast to Mac"
+        }
+      ]
+    }
+  ],
+  "boundaries": [
+    {
+      "kind": "region",
+      "label": "Mac · macOS 14+",
+      "wraps": [
+        "mac_ui",
+        "mac_stream",
+        "mac_client",
+        "mac_secrets"
+      ]
+    },
+    {
+      "kind": "region",
+      "label": "Android phone · Android 10+",
+      "wraps": [
+        "gate",
+        "phone_secrets",
+        "daemon",
+        "media",
+        "phone_app",
+        "notifications",
+        "clipboard",
+        "camera"
+      ]
+    }
+  ],
+  "connections": [
+    {
+      "id": "ui-actions",
+      "from": "mac_ui",
+      "to": "mac_client",
+      "label": "actions"
+    },
+    {
+      "id": "play-video",
+      "from": "mac_ui",
+      "to": "mac_stream",
+      "label": "Play video"
+    },
+    {
+      "id": "byte-ranges",
+      "from": "mac_stream",
+      "to": "mac_client",
+      "label": "byte ranges"
+    },
+    {
+      "id": "mac-secret",
+      "from": "mac_client",
+      "to": "mac_secrets",
+      "label": "store · load"
+    },
+    {
+      "id": "frames",
+      "from": "mac_client",
+      "to": "gate",
+      "label": "TCP 8765 · LM+JSON",
+      "variant": "emphasis"
+    },
+    {
+      "id": "phone-secret",
+      "from": "gate",
+      "to": "phone_secrets",
+      "label": "store · verify"
+    },
+    {
+      "id": "paired-only",
+      "from": "gate",
+      "to": "daemon",
+      "label": "paired only",
+      "variant": "security"
+    },
+    {
+      "id": "gallery-files",
+      "from": "daemon",
+      "to": "media",
+      "label": "gallery · files"
+    },
+    {
+      "id": "share",
+      "from": "phone_app",
+      "to": "daemon",
+      "label": "Share → Mac"
+    },
+    {
+      "id": "notify",
+      "from": "notifications",
+      "to": "daemon",
+      "label": "post · reply",
+      "fromSide": "left",
+      "toSide": "right"
+    },
+    {
+      "id": "clip",
+      "from": "daemon",
+      "to": "clipboard"
+    },
+    {
+      "id": "cam",
+      "from": "camera",
+      "to": "daemon"
+    }
+  ],
+  "cards": [
+    {
+      "dot": "cyan",
+      "title": "Transport",
+      "items": [
+        "TCP 8765, length-framed JSON (LM header)",
+        "Wi-Fi via Bonjour _linkmymac._tcp, USB via adb forward",
+        "No TLS yet: Wi-Fi traffic is readable on the LAN"
+      ]
+    },
+    {
+      "dot": "rose",
+      "title": "Pairing & trust",
+      "items": [
+        "Single-use 6-char code + P-256 ECDH secret",
+        "Every connect: HMAC challenge in both directions",
+        "Nothing flows until both sides prove the secret"
+      ]
+    },
+    {
+      "dot": "emerald",
+      "title": "Media & files",
+      "items": [
+        "Photos and videos page separately, Group by Folder",
+        "Play streams byte ranges; seeking cancels ranges",
+        "Files stream in 64 KB chunks with backpressure"
+      ]
+    },
+    {
+      "dot": "violet",
+      "title": "On the Mac",
+      "items": [
+        "Received files land in ~/Downloads",
+        "Clipboard via NSPasteboard, banners via UNUserNotificationCenter"
+      ]
+    }
+  ]
+}
