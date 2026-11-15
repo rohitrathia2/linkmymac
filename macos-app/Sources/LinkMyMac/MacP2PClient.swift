@@ -5,6 +5,7 @@ import Combine
 import AppKit
 import CoreImage
 import ImageIO
+import UniformTypeIdentifiers
 
 /**
  * =============================================================================
@@ -87,6 +88,27 @@ public struct RemoteMediaItem: Identifiable, Sendable {
     public let width: Int
     public let height: Int
     public let thumbnailData: Data?
+    public var durationMs: Int64 = 0
+
+    public var isVideo: Bool { mimeType.hasPrefix("video/") }
+}
+
+/**
+ * -----------------------------------------------------------------------------
+ * FileTransfer: One row in the File Sharing list (either direction)
+ * -----------------------------------------------------------------------------
+ */
+public struct FileTransfer: Identifiable, Sendable {
+    public enum Direction: Sendable { case toPhone, fromPhone }
+    public enum Status: Sendable, Equatable { case inProgress, done, failed(String) }
+
+    public let id: String
+    public let name: String
+    public let direction: Direction
+    public let totalBytes: Int64
+    public var bytesTransferred: Int64 = 0
+    public var status: Status = .inProgress
+    public var localURL: URL? = nil
 }
 
 /**
@@ -146,29 +168,66 @@ public final class MacP2PClient: ObservableObject {
     @Published public private(set) var lastSyncedClipboardText: String = ""
     @Published public private(set) var clipboardSyncHistory: [String] = []
 
+    // Pairing: nothing is exchanged until both sides prove they share a secret (WIRE_SPEC.md §3)
+    @Published public private(set) var isPaired: Bool = false
+    @Published public private(set) var needsPairingCode: Bool = false
+    @Published public private(set) var pairingError: String? = nil
+
+    // File sharing, both directions, newest first
+    @Published public private(set) var transfers: [FileTransfer] = []
+
     // Network Engine Components
+    nonisolated static let lastHostKey = "LinkMyMac.lastDirectHost"
     private var browser: NWBrowser?
     private var connection: NWConnection?
+    /// Bumped whenever `connection` is replaced or torn down. Callbacks from an older
+    /// connection compare against it and bail out instead of killing the live one.
+    private var connectionGeneration = 0
+    private var isTransportReady = false
     private var heartbeatTimer: Timer?
     private var autoReconnectTimer: Timer?
-    private var lastDirectHost: String? = "127.0.0.1"
+    private var lastDirectHost: String? = UserDefaults.standard.string(forKey: MacP2PClient.lastHostKey) ?? "127.0.0.1"
     private var lastDirectPort: UInt16? = 8765
     private var receiveBuffer = Data()
-
-    // File Download Assembler: transferId -> Accumulating byte buffer
-    private var incomingTransfers: [String: Data] = [:]
     private let networkQueue = DispatchQueue(label: "com.linkmymac.network", qos: .userInitiated)
+
+    // Authentication state for the current connection
+    // ponytail: secrets live in UserDefaults; move them to the Keychain once the app is Developer ID–signed
+    private static let deviceIdKey = "LinkMyMac.deviceId"
+    private static let pairedPhonesKey = "LinkMyMac.pairedPhones" // phoneId -> base64 secret
+    private lazy var deviceId: String = {
+        if let id = UserDefaults.standard.string(forKey: Self.deviceIdKey) { return id }
+        let id = UUID().uuidString
+        UserDefaults.standard.set(id, forKey: Self.deviceIdKey)
+        return id
+    }()
+    private lazy var macName = Host.current().localizedName ?? "Mac"
+    private var challenge: (phoneId: String, nonce: String)?
+    private var macNonce = ""
+    private var pairingKey: P256.KeyAgreement.PrivateKey?
+    private var pendingPairingCode: String?
+    private var awaitingAck = false
+
+    // Files arriving from the phone, streamed to a temp file until complete
+    private struct IncomingFile {
+        let handle: FileHandle
+        let tempURL: URL
+        let name: String
+        var nextChunk = 0
+        var bytes: Int64 = 0
+    }
+    private var incomingFiles: [String: IncomingFile] = [:]
 
     // Subsystem Callbacks
     public var onRemoteClipboardReceived: ((String, String) -> Void)?
     public var onMirroredNotificationPosted: ((MirroredNotification) -> Void)?
     public var onMediaControlCommandReceived: ((String) -> Void)?
     public var onConnected: (() -> Void)?
+    public var onFileReceived: ((URL) -> Void)?
 
     public init() {
         startDiscovery()
-        // Connect directly via local Wi-Fi IP address
-        connectDirect(host: "192.168.1.8", port: 8765)
+        // The first direct connection (last used host, USB tunnel by default) is opened by AppDelegate.
     }
 
     // =========================================================================
@@ -257,9 +316,10 @@ public final class MacP2PClient: ObservableObject {
      *   Required for USB ADB loopback tunneling (`adb forward tcp:8765 tcp:8765`)
      *   and corporate networks where multicast mDNS packets are dropped by routers.
      */
-    public func connectDirect(host: String, port: UInt16, pinnedCertFingerprint: String? = nil) {
+    public func connectDirect(host: String, port: UInt16) {
         lastDirectHost = host
         lastDirectPort = port
+        UserDefaults.standard.set(host, forKey: Self.lastHostKey)
         isWirelessConnection = (host != "127.0.0.1" && host != "localhost")
         let nwHost = NWEndpoint.Host(host)
         guard let nwPort = NWEndpoint.Port(rawValue: port) else { return }
@@ -288,13 +348,23 @@ public final class MacP2PClient: ObservableObject {
             Task { @MainActor in
                 guard let self else { return }
                 self.autoReconnectTimer = nil
-                if let peer = self.discoveredPeers.first {
-                    print("[MacP2PClient] Auto-connecting to wireless peer \(peer.name)...")
-                    self.connect(to: peer)
-                } else if let host = self.lastDirectHost, let port = self.lastDirectPort {
-                    self.connectDirect(host: host, port: port)
-                }
+                self.reconnect()
             }
+        }
+    }
+
+    /// Where a reconnect goes when no Bonjour peer is visible (127.0.0.1 = USB via adb forward).
+    public var directEndpointLabel: String {
+        "\(lastDirectHost ?? "127.0.0.1"):\(lastDirectPort ?? 8765)"
+    }
+
+    /// Bonjour peer if one is visible, otherwise the last direct host (USB tunnel by default).
+    public func reconnect() {
+        if let peer = discoveredPeers.first {
+            print("[MacP2PClient] Auto-connecting to wireless peer \(peer.name)...")
+            connect(to: peer)
+        } else {
+            connectDirect(host: lastDirectHost ?? "127.0.0.1", port: lastDirectPort ?? 8765)
         }
     }
 
@@ -317,26 +387,27 @@ public final class MacP2PClient: ObservableObject {
         disconnect(clearReconnect: false)
         self.connection = conn
         self.connectionState = "Connecting to \(displayLabel)..."
+        let generation = connectionGeneration
 
         conn.stateUpdateHandler = { [weak self] state in
             print("[MacP2PClient] Socket state changed: \(state)")
             Task { @MainActor in
-                guard let self else { return }
+                // A replaced connection still reports .cancelled/.failed later on.
+                // Acting on that would tear down the connection that replaced it.
+                guard let self, generation == self.connectionGeneration else { return }
                 switch state {
                 case .ready:
                     self.autoReconnectTimer?.invalidate()
                     self.autoReconnectTimer = nil
-                    self.connectionState = "Connected"
+                    self.isTransportReady = true
+                    self.connectionState = "Verifying phone..."
                     self.connectedDeviceName = displayLabel
-                    self.sendPairingHandshake()
                     self.startHeartbeatLoop()
                     self.receiveNextChunk()
-                    self.requestNotificationSync()
-                    self.requestMediaIndex(offset: 0, limit: 30)
-                    self.onConnected?()
+                    // The phone speaks first with AUTH_CHALLENGE; data starts after handlePairingAck.
                 case .failed(let error):
+                    self.disconnect()
                     self.connectionState = "Connecting (auto-retry): \(error.localizedDescription)"
-                    self.connectedDeviceName = nil
                     self.scheduleAutoReconnect()
                 case .waiting(let error):
                     self.connectionState = "Waiting: \(error.localizedDescription)"
@@ -365,11 +436,18 @@ public final class MacP2PClient: ObservableObject {
             autoReconnectTimer?.invalidate()
             autoReconnectTimer = nil
         }
+        connectionGeneration += 1 // anything still in flight from this connection is now stale
         heartbeatTimer?.invalidate()
         heartbeatTimer = nil
         connection?.cancel()
         connection = nil
         receiveBuffer.removeAll()
+        isTransportReady = false
+        isPaired = false
+        awaitingAck = false
+        challenge = nil
+        pairingKey = nil
+        failUnfinishedTransfers(reason: "Connection lost")
         connectedDeviceName = nil
         connectionState = "Disconnected"
     }
@@ -398,26 +476,28 @@ public final class MacP2PClient: ObservableObject {
      */
     @discardableResult
     public func sendControlJSON(_ dict: [String: Any]) -> Bool {
-        guard let conn = connection,
-              connectionState == "Connected",
-              let payload = try? JSONSerialization.data(withJSONObject: dict, options: []) else {
+        // Clipboard, replies, media commands... never leave this Mac before the phone is verified.
+        guard isPaired else { return false }
+        return sendFrame(dict)
+    }
+
+    /// Transport-level send, also used before pairing (handshake, heartbeats).
+    @discardableResult
+    private func sendFrame(_ dict: [String: Any]) -> Bool {
+        guard let conn = connection, isTransportReady, let frame = try? Self.frame(dict) else {
             return false
         }
-
-        var header = Data(capacity: 8)
-        var magic = Self.magicBytes.bigEndian
-        var flags = Self.flagJsonFrame.bigEndian
-        var length = UInt32(payload.count).bigEndian
-
-        header.append(Data(bytes: &magic, count: 2))
-        header.append(Data(bytes: &flags, count: 2))
-        header.append(Data(bytes: &length, count: 4))
-
-        var frame = header
-        frame.append(payload)
-
         conn.send(content: frame, completion: .contentProcessed { _ in })
         return true
+    }
+
+    /// `[0x4C 0x4D "LM"][flags 0x0001 = JSON][uint32 BE length][payload]`
+    nonisolated static func frame(_ dict: [String: Any]) throws -> Data {
+        let payload = try JSONSerialization.data(withJSONObject: dict)
+        var frame = Data([0x4C, 0x4D, 0x00, 0x01])
+        withUnsafeBytes(of: UInt32(payload.count).bigEndian) { frame.append(contentsOf: $0) }
+        frame.append(payload)
+        return frame
     }
 
     /**
@@ -438,10 +518,13 @@ public final class MacP2PClient: ObservableObject {
      */
     private func receiveNextChunk() {
         guard let conn = connection else { return }
+        let generation = connectionGeneration
 
         conn.receive(minimumIncompleteLength: 1, maximumLength: 65536) { [weak self] data, _, isComplete, error in
             Task { @MainActor in
-                guard let self else { return }
+                // A cancelled connection completes its pending receive with an error;
+                // without this check that error would disconnect the *new* connection.
+                guard let self, generation == self.connectionGeneration else { return }
                 if let data, !data.isEmpty {
                     self.receiveBuffer.append(data)
                     self.processReceiveBuffer()
@@ -483,6 +566,12 @@ public final class MacP2PClient: ObservableObject {
 
             let flags = receiveBuffer.subdata(in: 2..<4).withUnsafeBytes { $0.load(as: UInt16.self).bigEndian }
             let length = Int(receiveBuffer.subdata(in: 4..<8).withUnsafeBytes { $0.load(as: UInt32.self).bigEndian })
+            guard length <= 16 << 20 else {
+                // Same 16 MB cap as Android; an unverified peer could otherwise make us buffer gigabytes.
+                disconnect()
+                scheduleAutoReconnect()
+                return
+            }
 
             guard receiveBuffer.count >= 8 + length else {
                 // Wait for remaining bytes of this frame to arrive
@@ -526,12 +615,38 @@ public final class MacP2PClient: ObservableObject {
             return
         }
 
+        // Until the phone proves it holds our shared secret, only the handshake counts.
+        // Otherwise anything on the network advertising _linkmymac._tcp could push
+        // clipboard text, fake notifications or files into this Mac.
+        guard isPaired || type == "AUTH_CHALLENGE" || type == "PAIRING_ACK" else { return }
+
         switch type {
-        case "PAIRING_ACK":
-            if let deviceName = json["deviceName"] as? String {
-                self.connectedDeviceName = deviceName
+        case "AUTH_CHALLENGE":
+            guard !isPaired, let phoneId = json["phoneId"] as? String, let nonce = json["nonce"] as? String else { return }
+            challenge = (phoneId, nonce)
+            if let name = json["phoneName"] as? String {
+                connectedDeviceName = name
             }
-            self.onConnected?()
+            answerChallenge()
+
+        case "PAIRING_ACK":
+            handlePairingAck(json)
+
+        case "FILE_OFFER":
+            beginIncomingFile(json)
+
+        case "FILE_CHUNK":
+            appendIncomingFile(json)
+
+        case "FILE_TRANSFER_COMPLETE":
+            finishIncomingFile(json)
+
+        case "FILE_TRANSFER_RESULT":
+            // The phone's verdict on a file we sent it.
+            if let id = json["transferId"] as? String {
+                let ok = json["ok"] as? Bool == true
+                updateTransfer(id) { $0.status = ok ? .done : .failed(json["error"] as? String ?? "Phone couldn't save it") }
+            }
 
         case "HEARTBEAT_PONG":
             if let pct = json["batteryPercent"] as? Int {
@@ -606,21 +721,6 @@ public final class MacP2PClient: ObservableObject {
             if let mediaId = json["mediaId"] as? String,
                let success = json["success"] as? Bool, success {
                 self.mediaItems.removeAll { $0.id == mediaId }
-            }
-
-        case "FILE_CHUNK":
-            if let transferId = json["transferId"] as? String,
-               let b64 = json["dataBase64"] as? String,
-               let chunkData = Data(base64Encoded: b64) {
-                var current = incomingTransfers[transferId] ?? Data()
-                current.append(chunkData)
-                incomingTransfers[transferId] = current
-            }
-
-        case "FILE_TRANSFER_COMPLETE":
-            if let transferId = json["transferId"] as? String,
-               let fullData = incomingTransfers.removeValue(forKey: transferId) {
-                saveDownloadedFileToDownloads(transferId: transferId, data: fullData)
             }
 
         default:
@@ -784,7 +884,8 @@ public final class MacP2PClient: ObservableObject {
                     sizeBytes: size,
                     width: w,
                     height: h,
-                    thumbnailData: thumbData
+                    thumbnailData: thumbData,
+                    durationMs: (raw["durationMs"] as? NSNumber)?.int64Value ?? 0
                 )
             )
         }
@@ -812,31 +913,147 @@ public final class MacP2PClient: ObservableObject {
     // MARK: - 5. Outbound Commands & Requests
     // =========================================================================
 
+    // =========================================================================
+    // MARK: - Pairing & Authentication (WIRE_SPEC.md §3)
+    // =========================================================================
+
     /**
-     * WHAT IT DOES: Sends initial pairing handshake packet to Android.
-     * HOW IT DOES IT: Transmits `PAIRING_HANDSHAKE` frame with local Mac hostname.
-     * WHY IT DOES IT: Identifies the macOS client to the Android daemon.
+     * Answers the phone's AUTH_CHALLENGE: with an HMAC proof if we're already paired
+     * with this phone, with the pairing code + an ephemeral ECDH key if the user gave
+     * us one, otherwise by asking the user for the code shown on the phone.
      */
-    private func sendPairingHandshake() {
-        let hostName = Host.current().localizedName ?? "Mac"
-        sendControlJSON([
+    private func answerChallenge() {
+        guard let challenge else { return }
+        macNonce = Self.randomHex(16)
+        var handshake: [String: Any] = [
             "type": "PAIRING_HANDSHAKE",
-            "deviceId": UUID().uuidString,
-            "deviceName": hostName,
-            "platform": "macos"
-        ])
+            "deviceId": deviceId,
+            "deviceName": macName,
+            "platform": "macos",
+            "macNonce": macNonce
+        ]
+        if let secret = pairedSecret(for: challenge.phoneId) {
+            handshake["proof"] = Self.proof(secret, role: "mac", nonce: challenge.nonce)
+        } else if let code = pendingPairingCode {
+            pendingPairingCode = nil
+            let key = P256.KeyAgreement.PrivateKey()
+            pairingKey = key
+            handshake["pairingCode"] = code
+            handshake["macPublicKey"] = key.publicKey.derRepresentation.base64EncodedString()
+        } else {
+            needsPairingCode = true
+            connectionState = "Pairing required"
+            return
+        }
+        awaitingAck = sendFrame(handshake)
+    }
+
+    /// Called by the pairing prompt. Used right away, or on the next challenge if we're offline.
+    public func submitPairingCode(_ code: String) {
+        pairingError = nil
+        pendingPairingCode = code
+        if challenge != nil, !awaitingAck {
+            answerChallenge()
+        }
+    }
+
+    private func handlePairingAck(_ json: [String: Any]) {
+        guard awaitingAck, let challenge else { return }
+        awaitingAck = false
+        let usedPairingKey = pairingKey
+        pairingKey = nil
+
+        guard json["accepted"] as? Bool == true else {
+            if usedPairingKey == nil {
+                savePairedSecret(nil, for: challenge.phoneId) // the phone forgot this Mac
+            }
+            needsPairingCode = true
+            connectionState = "Pairing required"
+            switch json["error"] as? String {
+            case "INVALID_CODE": pairingError = "Wrong code. Check the phone and try again."
+            case "RATE_LIMITED": pairingError = "Too many attempts. Wait a few seconds and retry."
+            default: pairingError = usedPairingKey == nil ? "This phone no longer trusts this Mac. Enter its code to pair again." : nil
+            }
+            return
+        }
+
+        // New pairing: derive the secret from ECDH. Reconnect: use the stored one.
+        var secret = pairedSecret(for: challenge.phoneId)
+        if let key = usedPairingKey {
+            guard let keyData = (json["phonePublicKey"] as? String).flatMap({ Data(base64Encoded: $0) }),
+                  let phoneKey = try? P256.KeyAgreement.PublicKey(derRepresentation: keyData),
+                  let shared = try? key.sharedSecretFromKeyAgreement(with: phoneKey) else {
+                pairingError = "Pairing failed. Try again."
+                needsPairingCode = true
+                return
+            }
+            secret = Self.hmac(key: shared.withUnsafeBytes { Data($0) }, message: Data("linkmymac-pairing-v1".utf8))
+        }
+
+        // The phone must prove it holds the same secret, or it's an impostor.
+        guard let secret, (json["proof"] as? String)?.lowercased() == Self.proof(secret, role: "phone", nonce: macNonce) else {
+            pairingError = "The phone failed verification."
+            disconnect()
+            scheduleAutoReconnect()
+            return
+        }
+
+        if usedPairingKey != nil {
+            savePairedSecret(secret, for: challenge.phoneId)
+        }
+        pendingPairingCode = nil
+        isPaired = true
+        needsPairingCode = false
+        pairingError = nil
+        connectionState = "Connected"
+        if let deviceName = json["deviceName"] as? String {
+            connectedDeviceName = deviceName
+        }
+        // The phone pushes its notifications itself once we're verified.
+        requestMediaIndex(offset: 0, limit: 30)
+        onConnected?()
+    }
+
+    private func pairedSecret(for phoneId: String) -> Data? {
+        let all = UserDefaults.standard.dictionary(forKey: Self.pairedPhonesKey) as? [String: String]
+        return all?[phoneId].flatMap { Data(base64Encoded: $0) }
+    }
+
+    private func savePairedSecret(_ secret: Data?, for phoneId: String) {
+        var all = UserDefaults.standard.dictionary(forKey: Self.pairedPhonesKey) as? [String: String] ?? [:]
+        if let secret {
+            all[phoneId] = secret.base64EncodedString()
+        } else {
+            all.removeValue(forKey: phoneId)
+        }
+        UserDefaults.standard.set(all, forKey: Self.pairedPhonesKey)
+    }
+
+    private nonisolated static func hmac(key: Data, message: Data) -> Data {
+        Data(HMAC<SHA256>.authenticationCode(for: message, using: SymmetricKey(data: key)))
+    }
+
+    /// HMAC-SHA256(secret, "<role>|<nonce>") as lowercase hex; must match PairingManager.proof on Android.
+    private nonisolated static func proof(_ secret: Data, role: String, nonce: String) -> String {
+        hmac(key: secret, message: Data("\(role)|\(nonce)".utf8)).map { String(format: "%02x", $0) }.joined()
+    }
+
+    private nonisolated static func randomHex(_ byteCount: Int) -> String {
+        (0..<byteCount).map { _ in String(format: "%02x", UInt8.random(in: .min ... .max)) }.joined()
     }
 
     /**
      * WHAT IT DOES: Maintains active socket keepalive and queries phone battery.
      * HOW IT DOES IT: Schedules a 5.0s repeating timer emitting `HEARTBEAT_PING`.
      * WHY IT DOES IT: Prevents OS socket timeouts and keeps battery % updated.
+     *                 Also sent before pairing, so the phone's 30 s pre-auth timeout
+     *                 doesn't drop us while the user reads the pairing code.
      */
     private func startHeartbeatLoop() {
         heartbeatTimer?.invalidate()
         heartbeatTimer = Timer.scheduledTimer(withTimeInterval: 5.0, repeats: true) { [weak self] _ in
             Task { @MainActor in
-                self?.sendControlJSON([
+                self?.sendFrame([
                     "type": "HEARTBEAT_PING",
                     "clientTimeMs": Int64(Date().timeIntervalSince1970 * 1000)
                 ])
@@ -891,11 +1108,6 @@ public final class MacP2PClient: ObservableObject {
      * HOW IT DOES IT: Emits `MEDIA_INDEX_REQUEST` with offset and limit parameters.
      * WHY IT DOES IT: Allows paginated photo gallery loading on demand.
      */
-    /**
-     * WHAT IT DOES: Requests a batch of camera roll thumbnails from Android.
-     * HOW IT DOES IT: Emits `MEDIA_INDEX_REQUEST` with offset and limit parameters.
-     * WHY IT DOES IT: Allows paginated photo gallery loading on demand.
-     */
     public func requestMediaIndex(offset: Int = 0, limit: Int = 50) {
         sendControlJSON([
             "type": "MEDIA_INDEX_REQUEST",
@@ -941,7 +1153,9 @@ public final class MacP2PClient: ObservableObject {
         guard let downloadsURL = FileManager.default.urls(for: .downloadsDirectory, in: .userDomainMask).first else {
             return nil
         }
-        let candidates = [
+        // Downloads are saved as media_<id>.<original extension> (older builds always used .jpg).
+        let ext = mediaItems.first(where: { $0.id == mediaId }).map { ($0.displayName as NSString).pathExtension } ?? ""
+        let candidates = (ext.isEmpty ? [] : [downloadsURL.appendingPathComponent("media_\(mediaId).\(ext)")]) + [
             downloadsURL.appendingPathComponent("media_\(mediaId).jpg"),
             downloadsURL.appendingPathComponent("\(mediaId).jpg")
         ]
@@ -968,19 +1182,199 @@ public final class MacP2PClient: ObservableObject {
         ])
     }
 
-    /**
-     * WHAT IT DOES: Saves completed chunked download bytes to user's ~/Downloads directory.
-     * HOW IT DOES IT: Writes data to `FileManager.default.urls(for: .downloadsDirectory)`.
-     * WHY IT DOES IT: Delivers downloaded photos directly to standard user download storage.
-     */
-    private func saveDownloadedFileToDownloads(transferId: String, data: Data) {
-        guard let downloadsURL = FileManager.default.urls(for: .downloadsDirectory, in: .userDomainMask).first else {
+    // =========================================================================
+    // MARK: - File Sharing (WIRE_SPEC.md §4)
+    // =========================================================================
+
+    /// Mac → phone. Files go one after another; each lands in the phone's Download/LinkMyMac.
+    public func sendFiles(_ urls: [URL]) {
+        guard isPaired, let conn = connection else {
+            for url in urls {
+                transfers.insert(FileTransfer(id: UUID().uuidString, name: url.lastPathComponent, direction: .toPhone,
+                                              totalBytes: 0, status: .failed("Phone not connected")), at: 0)
+            }
             return
         }
-        let targetURL = downloadsURL.appendingPathComponent("\(transferId).jpg")
-        try? data.write(to: targetURL)
-        let mediaId = transferId.replacingOccurrences(of: "media_", with: "")
-        self.downloadedMediaFiles[mediaId] = targetURL
+        var jobs: [(id: String, url: URL)] = []
+        for url in urls {
+            let values = try? url.resourceValues(forKeys: [.isDirectoryKey, .fileSizeKey])
+            var row = FileTransfer(id: UUID().uuidString, name: url.lastPathComponent, direction: .toPhone,
+                                   totalBytes: Int64(values?.fileSize ?? 0))
+            if values?.isDirectory == true {
+                row.status = .failed("Folders aren't supported. Zip it first.") // ponytail: zip on the fly if asked
+            } else {
+                jobs.append((row.id, url))
+            }
+            transfers.insert(row, at: 0)
+        }
+        guard !jobs.isEmpty else { return }
+        // Off the main actor: reading + base64 of big files shouldn't stall the UI.
+        // Strong self is fine, the client is an app-lifetime singleton.
+        Task.detached(priority: .userInitiated) { [self] in
+            for job in jobs {
+                do {
+                    try await Self.streamFile(job.url, id: job.id, over: conn) { sent in
+                        await self.transferProgress(job.id, bytes: sent)
+                    }
+                } catch {
+                    await self.transferFailed(job.id, reason: error.localizedDescription)
+                }
+            }
+        }
+    }
+
+    /// FILE_OFFER → 64 KB FILE_CHUNKs → FILE_TRANSFER_COMPLETE. Each send waits until
+    /// Network.framework has taken the bytes, so a 4 GB file never sits in memory.
+    private nonisolated static func streamFile(
+        _ url: URL, id: String, over conn: NWConnection,
+        progress: @Sendable (Int64) async -> Void
+    ) async throws {
+        let handle = try FileHandle(forReadingFrom: url)
+        defer { try? handle.close() }
+        let mime = UTType(filenameExtension: url.pathExtension)?.preferredMIMEType ?? "application/octet-stream"
+        let size = (try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? -1
+        try await send(["type": "FILE_OFFER", "transferId": id, "fileName": url.lastPathComponent,
+                        "mimeType": mime, "totalBytes": size], over: conn)
+        var index = 0
+        var sent: Int64 = 0
+        while let chunk = try handle.read(upToCount: 64 * 1024), !chunk.isEmpty {
+            try await send(["type": "FILE_CHUNK", "transferId": id, "chunkIndex": index,
+                            "dataBase64": chunk.base64EncodedString()], over: conn)
+            index += 1
+            sent += Int64(chunk.count)
+            if index % 16 == 0 { await progress(sent) } // UI update every ~1 MB
+        }
+        try await send(["type": "FILE_TRANSFER_COMPLETE", "transferId": id, "totalChunks": index], over: conn)
+        await progress(sent) // stays "in progress" until the phone's FILE_TRANSFER_RESULT
+    }
+
+    private nonisolated static func send(_ dict: [String: Any], over conn: NWConnection) async throws {
+        let data = try frame(dict)
+        try await withCheckedThrowingContinuation { (done: CheckedContinuation<Void, Error>) in
+            conn.send(content: data, completion: .contentProcessed { error in
+                if let error { done.resume(throwing: error) } else { done.resume() }
+            })
+        }
+    }
+
+    private func transferProgress(_ id: String, bytes: Int64) {
+        updateTransfer(id) { $0.bytesTransferred = bytes }
+    }
+
+    private func transferFailed(_ id: String, reason: String) {
+        updateTransfer(id) { if $0.status == .inProgress { $0.status = .failed(reason) } }
+    }
+
+    private func updateTransfer(_ id: String, _ change: (inout FileTransfer) -> Void) {
+        guard let index = transfers.firstIndex(where: { $0.id == id }) else { return }
+        change(&transfers[index])
+    }
+
+    public func clearFinishedTransfers() {
+        transfers.removeAll { $0.status != .inProgress }
+    }
+
+    // Phone → Mac: written to a temp file, moved into ~/Downloads when complete.
+    private func beginIncomingFile(_ json: [String: Any]) {
+        guard let id = json["transferId"] as? String, incomingFiles[id] == nil else { return }
+        let name = Self.safeFileName(json["fileName"] as? String)
+        let temp = FileManager.default.temporaryDirectory.appendingPathComponent("linkmymac-\(UUID().uuidString)")
+        guard FileManager.default.createFile(atPath: temp.path, contents: nil),
+              let handle = try? FileHandle(forWritingTo: temp) else { return }
+        incomingFiles[id] = IncomingFile(handle: handle, tempURL: temp, name: name)
+        let total = (json["totalBytes"] as? NSNumber)?.int64Value ?? 0
+        transfers.removeAll { $0.id == id } // a re-downloaded photo reuses its transfer id
+        transfers.insert(FileTransfer(id: id, name: name, direction: .fromPhone, totalBytes: max(total, 0)), at: 0)
+    }
+
+    private func appendIncomingFile(_ json: [String: Any]) {
+        guard let id = json["transferId"] as? String, var file = incomingFiles[id] else { return }
+        guard json["chunkIndex"] as? Int == file.nextChunk,
+              let chunk = (json["dataBase64"] as? String).flatMap({ Data(base64Encoded: $0) }) else {
+            return failIncomingFile(id, reason: "Corrupted transfer")
+        }
+        do {
+            try file.handle.write(contentsOf: chunk)
+        } catch {
+            return failIncomingFile(id, reason: error.localizedDescription)
+        }
+        file.nextChunk += 1
+        file.bytes += Int64(chunk.count)
+        incomingFiles[id] = file
+        if file.nextChunk % 16 == 0 { transferProgress(id, bytes: file.bytes) }
+    }
+
+    private func finishIncomingFile(_ json: [String: Any]) {
+        guard let id = json["transferId"] as? String, let file = incomingFiles[id] else { return }
+        guard json["totalChunks"] as? Int == file.nextChunk else {
+            return failIncomingFile(id, reason: "Transfer incomplete")
+        }
+        incomingFiles.removeValue(forKey: id)
+        try? file.handle.close()
+        let downloads = FileManager.default.urls(for: .downloadsDirectory, in: .userDomainMask).first
+            ?? FileManager.default.temporaryDirectory
+        let destination = Self.uniqueURL(in: downloads, name: file.name)
+        do {
+            try FileManager.default.moveItem(at: file.tempURL, to: destination)
+        } catch {
+            try? FileManager.default.removeItem(at: file.tempURL)
+            updateTransfer(id) { $0.status = .failed(error.localizedDescription) }
+            sendControlJSON(["type": "FILE_TRANSFER_RESULT", "transferId": id, "ok": false, "error": error.localizedDescription])
+            return
+        }
+        updateTransfer(id) {
+            $0.status = .done
+            $0.bytesTransferred = file.bytes
+            $0.localURL = destination
+        }
+        sendControlJSON(["type": "FILE_TRANSFER_RESULT", "transferId": id, "ok": true])
+        if id.hasPrefix("media_") {
+            downloadedMediaFiles[String(id.dropFirst("media_".count))] = destination // Photos tab download
+        } else {
+            onFileReceived?(destination)
+        }
+    }
+
+    private func failIncomingFile(_ id: String, reason: String) {
+        if let file = incomingFiles.removeValue(forKey: id) {
+            try? file.handle.close()
+            try? FileManager.default.removeItem(at: file.tempURL)
+        }
+        updateTransfer(id) { $0.status = .failed(reason) }
+        sendControlJSON(["type": "FILE_TRANSFER_RESULT", "transferId": id, "ok": false, "error": reason])
+    }
+
+    private func failUnfinishedTransfers(reason: String) {
+        for (_, file) in incomingFiles {
+            try? file.handle.close()
+            try? FileManager.default.removeItem(at: file.tempURL)
+        }
+        incomingFiles.removeAll()
+        for index in transfers.indices where transfers[index].status == .inProgress {
+            transfers[index].status = .failed(reason)
+        }
+    }
+
+    /// The name comes from the network: keep a plain file name so it can't escape ~/Downloads.
+    private nonisolated static func safeFileName(_ raw: String?) -> String {
+        let last = (raw ?? "").components(separatedBy: CharacterSet(charactersIn: "/\\:")).last ?? ""
+        let cleaned = String(String.UnicodeScalarView(last.unicodeScalars.filter { !CharacterSet.controlCharacters.contains($0) }))
+            .trimmingCharacters(in: .whitespaces)
+            .trimmingCharacters(in: CharacterSet(charactersIn: "."))
+        return cleaned.isEmpty ? "file" : String(cleaned.prefix(200))
+    }
+
+    /// Finder-style "name (1).ext" so an incoming file never overwrites an existing one.
+    private nonisolated static func uniqueURL(in directory: URL, name: String) -> URL {
+        let base = (name as NSString).deletingPathExtension
+        let ext = (name as NSString).pathExtension
+        var candidate = directory.appendingPathComponent(name)
+        var counter = 1
+        while FileManager.default.fileExists(atPath: candidate.path) {
+            candidate = directory.appendingPathComponent(ext.isEmpty ? "\(base) (\(counter))" : "\(base) (\(counter)).\(ext)")
+            counter += 1
+        }
+        return candidate
     }
 
     /**
@@ -1118,10 +1512,10 @@ public final class MacP2PClient: ObservableObject {
      * HOW IT DOES IT:
      *   1. Deserializes JSON payload extracting `ips`, `port`, `certFp`, `nonce`, and `name`.
      *   2. Selects the primary non-loopback IP address from `ips` array.
-     *   3. Sets `pinnedCertFingerprint = certFp`.
+     *   3. Keeps the QR's pairing `code` for the phone's next AUTH_CHALLENGE.
      *   4. Initiates direct TCP connection via `connectDirect(host: ip, port: port)`.
-     * WHY IT DOES IT: Eliminates all manual typing of IP addresses and establishes
-     *                 cryptographic certificate pinning in a single gesture.
+     * WHY IT DOES IT: Eliminates manual typing of the IP address and pairing code.
+     *                 (The QR's `certFp` is unused until the transport moves to TLS.)
      * -------------------------------------------------------------------------
      */
     public func connectViaQRPayload(_ qrJsonString: String) -> Bool {
@@ -1132,14 +1526,15 @@ public final class MacP2PClient: ObservableObject {
 
         let name = json["name"] as? String ?? "Android Device"
         let port = (json["port"] as? NSNumber)?.uint16Value ?? 8765
-        let certFp = json["certFp"] as? String
         let ips = json["ips"] as? [String] ?? []
 
         // Choose best IP: prefer non-loopback LAN IP, fallback to 127.0.0.1
         let targetHost = ips.first(where: { !$0.starts(with: "127.") }) ?? ips.first ?? "127.0.0.1"
 
+        // The QR carries the pairing code, so the next AUTH_CHALLENGE pairs without typing.
+        pendingPairingCode = json["code"] as? String
         self.connectedDeviceName = name
-        self.connectDirect(host: targetHost, port: port, pinnedCertFingerprint: certFp)
+        self.connectDirect(host: targetHost, port: port)
         return true
     }
 

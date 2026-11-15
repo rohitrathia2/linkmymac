@@ -1,73 +1,107 @@
-# LinkMyMac — Open-Source Cross-Device P2P Bridge (macOS ⇄ Android)
+# LinkMyMac — Android ⇄ macOS bridge, no cloud
 
-A complete, local-first peer-to-peer bridge connecting **macOS** (Swift 6 / SwiftUI / AppKit) and **Android** (Kotlin / Foreground Daemon / NotificationListenerService) over local Wi-Fi, Personal Hotspot, or USB ADB loopback with **zero cloud accounts**.
+Mirrors notifications, syncs the clipboard, browses and downloads the phone's photos and videos, shows the phone camera on the Mac, and shares files both ways. Everything goes directly between the two devices over Wi-Fi or a USB cable. No accounts, no cloud.
+
+- **Android companion** (`android-app/`, Kotlin): a foreground service that listens on TCP 8765 and advertises `_linkmymac._tcp` over Bonjour/mDNS.
+- **macOS app** (`macos-app/`, Swift 6 / SwiftUI, shown as "UniBridge"): finds the phone over Bonjour or connects through USB (`adb forward`).
+- **Protocol** (`protocol/WIRE_SPEC.md`): length-framed JSON over TCP, plus pairing and authentication.
 
 ---
 
-## Repository Structure
+## Repository layout
 
 ```
 linkmymac-project/
 ├── protocol/
-│   ├── linkmymac_protocol.proto     # Shared Protobuf schema for P2P wire frames
-│   └── WIRE_SPEC.md                 # 8-byte length-delimited header & mTLS spec
-├── android-app/                     # Android Companion & Foreground Daemon (Kotlin)
-│   ├── build.gradle.kts
-│   └── src/main/
-│       ├── AndroidManifest.xml
-│       └── java/com/linkmymac/android/
-│           ├── crypto/CryptoKeystoreManager.kt    # AndroidKeyStore EC P-256 & QR builder
-│           ├── service/P2PDaemonService.kt        # NsdManager mDNS & 8-byte framed socket
-│           ├── service/LMMNotificationListener.kt # StatusBarNotification & RemoteInput reply
-│           ├── service/ClipboardSyncHelper.kt     # Bidirectional clipboard with SHA-256 dedup
-│           ├── service/MediaStoreProvider.kt      # 200x200 WebP thumbnails & 64KB chunking
-│           └── ui/MainActivity.kt                 # Pairing dashboard & permission launcher
-└── macos-app/                       # Native macOS Client & Menu Bar Extra (Swift 6)
-    ├── Package.swift
+│   ├── WIRE_SPEC.md                  # framing, pairing/auth, file transfer, message list
+│   ├── e2e_check.py                  # on-device protocol check over USB (see Testing)
+│   └── linkmymac_protocol.proto      # planned binary schema, not used on the wire yet
+├── android-app/src/main/java/com/linkmymac/android/
+│   ├── crypto/PairingManager.kt      # pairing code, ECDH pairing, HMAC challenge
+│   ├── crypto/CryptoKeystoreManager.kt  # QR pairing payload
+│   ├── service/P2PDaemonService.kt   # TCP server, auth gate, file streaming
+│   ├── service/LMMNotificationListener.kt  # notification mirroring + quick reply
+│   ├── service/ClipboardSyncHelper.kt      # clipboard sync with SHA-256 dedup
+│   ├── service/MediaStoreProvider.kt # photo + video gallery, thumbnails, delete
+│   ├── service/CameraStreamProvider.kt     # phone camera frames
+│   └── ui/MainActivity.kt            # dashboard, pairing code, share target
+└── macos-app/
+    ├── bundle.sh                     # builds ../LinkMyMac.app (release, ad-hoc signed)
+    ├── Info.plist
     └── Sources/LinkMyMac/
-        ├── LinkMyMacApp.swift       # SwiftUI SplitView Dashboard + MenuBarExtra
-        ├── MacP2PClient.swift       # NWBrowser Bonjour discovery & NWConnection framing
-        └── MacSubsystems.swift      # NSPasteboard observer & UNUserNotificationCenter bridge
+        ├── LinkMyMacApp.swift        # dashboard window + menu bar
+        ├── MacP2PClient.swift        # discovery, connection, auth, file transfer
+        ├── MacSubsystems.swift       # clipboard watcher, notification banners
+        └── MacMediaManager.swift     # Mac "Now Playing" bridge
 ```
 
----
+## Build and run
 
-## Quick Start & Build Instructions
+**Android** (Android 10+):
+```bash
+cd android-app
+./gradlew assembleDebug
+adb install -r build/outputs/apk/debug/LinkMyMac-Android-debug.apk
+```
+Open the app and grant notification access and all-files access when it asks.
 
-### 1. Build & Run the Android Companion App
-1. Open `android-app/` in **Android Studio (Ladybug or newer)**.
-2. Connect your Android phone and run the `app` configuration (minSdk 29 / Android 10+).
-3. On the phone screen:
-   - Tap **"1. Grant Notification Mirroring Access"** and enable **LinkMyMac Notification Bridge** in Android Settings.
-   - Note the displayed local IP address and port (`8765`), or connect via USB and run:
-     ```bash
-     adb forward tcp:8765 tcp:8765
-     ```
+**macOS** (14 Sonoma+):
+```bash
+macos-app/bundle.sh        # builds LinkMyMac.app next to this README
+open LinkMyMac.app
+```
+`cd macos-app && swift run` also works for development, but notification banners need the `.app` bundle.
 
-### 2. Build & Run the macOS Client
-1. Open a terminal on your Mac (macOS 14.0 Sonoma or newer):
-   ```bash
-   cd macos-app
-   swift build
-   swift run LinkMyMac
-   ```
-2. Or open `macos-app/Package.swift` directly in **Xcode 16+**.
-3. The app automatically discovers `_linkmymac._tcp` peers via Bonjour, or you can click **"Connect USB (adb forward)"** / enter your phone's LAN IP.
+**Connect**
+- USB: `adb forward tcp:8765 tcp:8765`. On launch the Mac app connects to the last host it used, which is 127.0.0.1:8765 (USB) by default.
+- Wi-Fi: put both devices on the same network. The Mac finds the phone over Bonjour, or you can enter the phone's IP under QR Code Pairing → Manual IP.
 
----
+**Pair (once per Mac)**
+The first time a Mac connects, the phone shows a 6-character code in its top status badge and in the "Pair with your Mac" card. Type it into the prompt in the Mac sidebar, or scan the phone's QR code from the Mac's QR Code Pairing tab. After that, the devices reconnect on their own. "Forget Paired Macs" on the phone revokes every Mac.
 
-## Apple Continuity Feature Mapping & Architecture
+## Features
 
-| Apple Ecosystem Feature | What It Does on iPhone ⇄ Mac | Android API / Subsystem | macOS API / Subsystem | Implementation Complexity & Notes |
-|:---|:---|:---|:---|:---|
-| **iPhone Notifications & Quick Reply** | Mirrors phone alerts to Mac Notification Center with inline replies (Apple Continuity) | `NotificationListenerService` + `RemoteInput` | `UNUserNotificationCenter` | Low (Implemented) |
-| **Universal Clipboard** | Copy text, links, or images on one device and paste on the other (Apple Continuity) | `ClipboardManager` (`OnPrimaryClipChangedListener`) | `NSPasteboard` (`changeCount` observer) | Low–Medium (Implemented for text & history) |
-| **AirDrop & iCloud Photo Sync** | High-speed local file drops and instant camera roll browsing (Apple Continuity) | `MediaStore` + 64 KB chunked stream | `NWConnection` + `NSDraggingDestination` + `NSSharingServicePicker` | Low–Medium (Implemented with Sync All, Share & Delete) |
-| **Text Message Forwarding** | Read and send SMS/MMS conversations directly from Mac (Apple Continuity) | `SmsManager` + `Telephony.Sms` provider | SwiftUI Chat View + Network frame | Low (Requires `SEND_SMS` and `READ_SMS` permissions; sideloaded or companion permission grant) |
-| **iPhone Mirroring** | View and interact with the phone screen wirelessly from a Mac window (Apple Continuity) | `MediaProjectionManager` (MediaProjection H.264/HEVC) + `AccessibilityService` (`dispatchGesture`) | `VideoToolbox` hardware decoder + `MTKView` / `AVSampleBufferDisplayLayer` | High (Video uses MediaProjection; remote touch/scroll injection uses AccessibilityService or adb shell input) |
-| **Continuity Camera (FaceTime / Webcam)** | Use the phone's camera and mic as a high-res Mac webcam with 1-click lens flip (Apple Continuity) | `CameraManager` (`android.hardware.camera2`) | Core Media I/O (`CMIOExtensionProviderSource`) + SwiftUI Viewport | High for system virtual camera / Medium for in-app FaceTime viewer (Implemented in-app with Front/Back switch & orientation tracking) |
-| **iPhone Cellular Calls** | Answer, place, and route phone calls using the Mac's mic and speakers (Apple Continuity) | `TelecomManager` + `TelephonyManager` | Bluetooth HFP Hands-Free Role + Call Alert UI | Medium–High (Call metadata/accept/reject routes over LAN; voice audio routes via standard Bluetooth Hands-Free Profile) |
-| **Universal Control (Mouse & Keyboard)** | Move the Mac cursor and keyboard seamlessly onto the phone screen (Apple Continuity) | `BluetoothHidDevice` or `AccessibilityService` | `CGEventTap` (captures cursor edge exit & keystrokes) | Medium (Mac captures edge mouse movement and acts as a Bluetooth HID combo mouse/keyboard or sends coordinates over LAN) |
-| **Instant Hotspot** | Enable the phone's Wi-Fi hotspot from the Mac menu bar without touching the phone (Apple Continuity) | `CompanionDeviceManager` + BLE Trigger + Tethering | `CoreBluetooth` BLE Central + `CoreWLAN` | Medium (Uses BLE advertisement so the Mac can see battery/signal and request hotspot activation even when offline) |
-| **Handoff & Now Playing Control** | Pass active web tabs/tasks between devices and control phone media playback on Mac (Apple Continuity) | `android.media` (`MediaController` via `NotificationListenerService`) + Share Target | `NSWorkspace.shared.open(url)` + Media Control Bar | Low (Sharing any URL to "Send to Mac" opens the active browser tab immediately on macOS) |
-| **Continuity Sketch & Document Scanner** | Scan physical documents with the phone camera or sketch on the phone and insert live on Mac (Apple Continuity) | `CameraManager` + Compose Canvas | `NSPasteboard` / Finder Quick Action | Low–Medium (Captures perspective-corrected PDF/PNG on Android and streams directly into the active Mac pasteboard or cursor) |
+| Feature | Status | How |
+|:---|:---|:---|
+| Notification mirroring + quick reply | ✅ | `NotificationListenerService` + `RemoteInput` → `UNUserNotificationCenter` |
+| Clipboard sync (text) | ✅ | `ClipboardManager` ⇄ `NSPasteboard`, SHA-256 dedup |
+| Photos & videos: browse, download, share, delete | ✅ | MediaStore images + videos → Photos & Videos tab; videos play in AVKit after download |
+| File sharing, both directions | ✅ | Mac: File Sharing tab (drop zone), Dock icon, menu bar. Android: Share → LinkMyMac Companion, or "Send Files to Mac" |
+| Phone camera on the Mac | ✅ in-app only | camera2 JPEG frames shown in the app; it is not a system webcam (no CMIO extension) |
+| Mac "Now Playing" controls on the phone | ✅ | Media notification on Android |
+| Shared links/text from Android | ⚠️ partial | They land on the Mac clipboard; nothing opens automatically |
+| SMS from the Mac | ❌ not built | |
+| Screen mirroring | ❌ not built | |
+| Phone calls through the Mac | ❌ not built | |
+| Mouse/keyboard sharing | ❌ not built | |
+| Instant hotspot | ❌ not built | |
+| Continuity Sketch / document scanner | ❌ not built | |
+
+## Security model
+
+- The phone ignores every frame from a connection until it proves it's a paired Mac. The proof is an HMAC challenge-response on a fresh nonce, so a captured answer can't be replayed. The shared secret comes from a one-time P-256 ECDH exchange authorised by the on-screen code, so it never travels over the network.
+- The Mac checks the phone the same way, so a fake device advertising `_linkmymac._tcp` can't push clipboard text, notifications or files into the Mac.
+- Pairing codes are single-use, and a wrong code blocks code attempts for 3 seconds.
+- **Not done yet: transport encryption.** On Wi-Fi, someone on the same network can read notifications, clipboard text and files in transit. An active attacker (ARP spoofing, or a fake Bonjour service relaying traffic) could take over an authenticated session. USB traffic (`adb forward`) never touches the network. The fix is TLS with the phone's certificate pinned at pairing; the QR code already carries its fingerprint.
+
+## Android permissions
+
+- Notification access and foreground service: the bridge itself.
+- All-files access (`MANAGE_EXTERNAL_STORAGE`): needed only so "Delete from Mac" can remove photos and videos made by other apps. Google Play restricts this permission. A Play build should switch to `MediaStore.createDeleteRequest`, which asks on the phone.
+- Camera: the phone-camera view.
+- App names and icons for mirrored notifications use a `<queries>` filter for launcher apps instead of `QUERY_ALL_PACKAGES`.
+- No SMS, contacts or call permissions.
+
+## Testing
+
+With the phone on USB:
+```bash
+adb forward tcp:8765 tcp:8765
+python3 protocol/e2e_check.py --code <code shown on the phone>
+```
+It plays the Mac's role against the real phone and checks:
+- the pairing gate: unpaired clients get nothing, wrong codes are rejected, retries are rate-limited, replayed proofs fail
+- photo and video streaming
+- a Mac → phone file transfer
+
+It leaves a test "Mac" paired on the phone; use "Forget Paired Macs" to remove it.

@@ -3,6 +3,7 @@ package com.linkmymac.android.service
 import android.content.ContentUris
 import android.content.Context
 import android.graphics.Bitmap
+import android.net.Uri
 import android.provider.MediaStore
 import android.util.Base64
 import android.util.Log
@@ -11,8 +12,6 @@ import org.json.JSONArray
 import org.json.JSONObject
 import java.io.ByteArrayOutputStream
 import java.io.File
-import java.io.InputStream
-import java.util.zip.CRC32
 
 /**
  * =============================================================================
@@ -20,14 +19,13 @@ import java.util.zip.CRC32
  * =============================================================================
  * WHAT IT DOES: Interfaces with Android's system `MediaStore` database to query
  *               photo library metadata, generate lightweight 200x200 WebP thumbnails,
- *               and stream full-resolution media files in 64 KB verified chunks.
+ *               and delete items. (Full-resolution downloads stream through
+ *               P2PDaemonService.streamFile, shared with file sharing.)
  * HOW IT DOES IT:
  *   1. Performs indexed cursor queries on `MediaStore.Images.Media.EXTERNAL_CONTENT_URI`
  *      sorted descending by modification time.
  *   2. Generates responsive thumbnail previews via `ContentResolver.loadThumbnail()`
  *      compressed into WebP format at 75% quality.
- *   3. Reads file binary streams via content URIs, divides bytes into 64 KB slices,
- *      computes a 32-bit CRC32 checksum per block, and dispatches frames over TCP.
  * WHY IT DOES IT: Empowers macOS users to browse their phone's camera roll with
  *                 instant visual previews and download full-resolution original
  *                 photos over high-throughput Wi-Fi or USB without third-party cloud
@@ -37,9 +35,29 @@ import java.util.zip.CRC32
 class MediaStoreProvider(private val context: Context) {
 
     companion object {
-        /** 64 KB transmission chunk size matching TCP window and memory buffer sweet spots */
-        const val CHUNK_SIZE_BYTES = 64 * 1024
+        private val FILES_URI: Uri = MediaStore.Files.getContentUri("external")
+        // Photos and videos together; MediaStore gives both one shared id space.
+        private val MEDIA_SELECTION = "${MediaStore.Files.FileColumns.MEDIA_TYPE} IN (" +
+            "${MediaStore.Files.FileColumns.MEDIA_TYPE_IMAGE}, ${MediaStore.Files.FileColumns.MEDIA_TYPE_VIDEO})"
     }
+
+    /** Download/delete only get an id from the Mac: look up whether it's a photo or a video. */
+    fun contentUriFor(mediaId: Long): Uri {
+        val isVideo = try {
+            context.contentResolver.query(
+                ContentUris.withAppendedId(FILES_URI, mediaId),
+                arrayOf(MediaStore.Files.FileColumns.MEDIA_TYPE), null, null, null
+            )?.use { it.moveToFirst() && it.getInt(0) == MediaStore.Files.FileColumns.MEDIA_TYPE_VIDEO } ?: false
+        } catch (_: Exception) {
+            false
+        }
+        return contentUriFor(mediaId, isVideo)
+    }
+
+    private fun contentUriFor(mediaId: Long, isVideo: Boolean): Uri = ContentUris.withAppendedId(
+        if (isVideo) MediaStore.Video.Media.EXTERNAL_CONTENT_URI else MediaStore.Images.Media.EXTERNAL_CONTENT_URI,
+        mediaId
+    )
 
     /**
      * -------------------------------------------------------------------------
@@ -62,23 +80,25 @@ class MediaStoreProvider(private val context: Context) {
     fun queryMediaIndex(offset: Int, limit: Int, includeThumbnails: Boolean): JSONObject {
         val itemsArray = JSONArray()
         val projection = arrayOf(
-            MediaStore.Images.Media._ID,
-            MediaStore.Images.Media.DISPLAY_NAME,
-            MediaStore.Images.Media.MIME_TYPE,
-            MediaStore.Images.Media.DATE_MODIFIED,
-            MediaStore.Images.Media.SIZE,
-            MediaStore.Images.Media.WIDTH,
-            MediaStore.Images.Media.HEIGHT
+            MediaStore.Files.FileColumns._ID,
+            MediaStore.Files.FileColumns.DISPLAY_NAME,
+            MediaStore.Files.FileColumns.MIME_TYPE,
+            MediaStore.Files.FileColumns.DATE_MODIFIED,
+            MediaStore.Files.FileColumns.SIZE,
+            MediaStore.Files.FileColumns.WIDTH,
+            MediaStore.Files.FileColumns.HEIGHT,
+            MediaStore.Files.FileColumns.MEDIA_TYPE,
+            MediaStore.MediaColumns.DURATION
         )
 
-        val sortOrder = "${MediaStore.Images.Media.DATE_MODIFIED} DESC"
+        val sortOrder = "${MediaStore.Files.FileColumns.DATE_MODIFIED} DESC"
         var totalCount = 0
 
         try {
             context.contentResolver.query(
-                MediaStore.Images.Media.EXTERNAL_CONTENT_URI,
+                FILES_URI,
                 projection,
-                null,
+                MEDIA_SELECTION,
                 null,
                 sortOrder
             )?.use { cursor ->
@@ -92,14 +112,14 @@ class MediaStoreProvider(private val context: Context) {
                     val sizeCol = cursor.getColumnIndexOrThrow(MediaStore.Images.Media.SIZE)
                     val widthCol = cursor.getColumnIndexOrThrow(MediaStore.Images.Media.WIDTH)
                     val heightCol = cursor.getColumnIndexOrThrow(MediaStore.Images.Media.HEIGHT)
+                    val typeCol = cursor.getColumnIndexOrThrow(MediaStore.Files.FileColumns.MEDIA_TYPE)
+                    val durationCol = cursor.getColumnIndexOrThrow(MediaStore.MediaColumns.DURATION)
 
                     var fetched = 0
                     do {
                         val mediaId = cursor.getLong(idCol)
-                        val contentUri = ContentUris.withAppendedId(
-                            MediaStore.Images.Media.EXTERNAL_CONTENT_URI,
-                            mediaId
-                        )
+                        val isVideo = cursor.getInt(typeCol) == MediaStore.Files.FileColumns.MEDIA_TYPE_VIDEO
+                        val contentUri = contentUriFor(mediaId, isVideo) // loadThumbnail grabs a frame for videos
 
                         var thumbBase64 = ""
                         if (includeThumbnails) {
@@ -119,7 +139,8 @@ class MediaStoreProvider(private val context: Context) {
                         itemsArray.put(JSONObject().apply {
                             put("mediaId", mediaId.toString())
                             put("displayName", cursor.getString(nameCol) ?: "Photo_$mediaId.jpg")
-                            put("mimeType", cursor.getString(mimeCol) ?: "image/jpeg")
+                            put("mimeType", cursor.getString(mimeCol) ?: if (isVideo) "video/mp4" else "image/jpeg")
+                            put("durationMs", if (isVideo) cursor.getLong(durationCol) else 0L)
                             put("dateModifiedSec", cursor.getLong(dateCol))
                             put("sizeBytes", cursor.getLong(sizeCol))
                             put("width", cursor.getInt(widthCol))
@@ -147,65 +168,6 @@ class MediaStoreProvider(private val context: Context) {
 
     /**
      * -------------------------------------------------------------------------
-     * streamMediaFileInChunks: High-Speed Chunked Binary Media Streamer
-     * -------------------------------------------------------------------------
-     * WHAT IT DOES: Streams an entire full-resolution original media file to the Mac
-     *               in sequential, checksum-verified 64 KB chunks.
-     * HOW IT DOES IT:
-     *   1. Resolves `contentUri` from `mediaId` and opens an `InputStream`.
-     *   2. Allocates a 64 KB buffer and reads sequentially until EOF.
-     *   3. Computes a 32-bit CRC32 checksum for each read slice to guard against
-     *      network packet corruption.
-     *   4. Encodes binary bytes in Base64 and emits a `FILE_CHUNK` JSON frame via
-     *      the `onChunk` callback:
-     *      `{ type: "FILE_CHUNK", transferId, chunkIndex, dataBase64, crc32 }`.
-     *   5. Emits a terminal `FILE_TRANSFER_COMPLETE` frame upon EOF.
-     * WHY IT DOES IT: Chunked streaming ensures multi-gigabyte videos or raw photos
-     *                 can be transferred smoothly without OutOfMemory errors while
-     *                 allowing real-time progress indicators on the desktop.
-     * -------------------------------------------------------------------------
-     */
-    fun streamMediaFileInChunks(
-        mediaId: Long,
-        transferId: String,
-        onChunk: (JSONObject) -> Unit
-    ) {
-        val contentUri = ContentUris.withAppendedId(
-            MediaStore.Images.Media.EXTERNAL_CONTENT_URI,
-            mediaId
-        )
-
-        val inputStream: InputStream = context.contentResolver.openInputStream(contentUri) ?: return
-        inputStream.use { stream ->
-            val buffer = ByteArray(CHUNK_SIZE_BYTES)
-            var chunkIndex = 0
-            var bytesRead: Int
-            while (stream.read(buffer).also { bytesRead = it } != -1) {
-                val slice = if (bytesRead == CHUNK_SIZE_BYTES) buffer else buffer.copyOf(bytesRead)
-                val crc = CRC32().apply { update(slice) }.value
-
-                val chunkFrame = JSONObject().apply {
-                    put("type", "FILE_CHUNK")
-                    put("transferId", transferId)
-                    put("chunkIndex", chunkIndex)
-                    put("dataBase64", Base64.encodeToString(slice, Base64.NO_WRAP))
-                    put("crc32", crc)
-                }
-                onChunk(chunkFrame)
-                chunkIndex++
-            }
-
-            onChunk(JSONObject().apply {
-                put("type", "FILE_TRANSFER_COMPLETE")
-                put("transferId", transferId)
-                put("totalChunks", chunkIndex)
-                put("verified", true)
-            })
-        }
-    }
-
-    /**
-     * -------------------------------------------------------------------------
      * deleteMediaItem: Remote Media Item Deletion Handler
      * -------------------------------------------------------------------------
      * WHAT IT DOES: Permanently deletes a photo from Android MediaStore and storage.
@@ -218,10 +180,7 @@ class MediaStoreProvider(private val context: Context) {
      * -------------------------------------------------------------------------
      */
     fun deleteMediaItem(mediaId: Long): Boolean {
-        val contentUri = ContentUris.withAppendedId(
-            MediaStore.Images.Media.EXTERNAL_CONTENT_URI,
-            mediaId
-        )
+        val contentUri = contentUriFor(mediaId)
 
         // Find file path for fallback
         var filePath: String? = null
@@ -283,11 +242,9 @@ class MediaStoreProvider(private val context: Context) {
             }
         }
         try {
-            context.contentResolver.registerContentObserver(
-                MediaStore.Images.Media.EXTERNAL_CONTENT_URI,
-                true,
-                contentObserver!!
-            )
+            for (uri in listOf(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, MediaStore.Video.Media.EXTERNAL_CONTENT_URI)) {
+                context.contentResolver.registerContentObserver(uri, true, contentObserver!!)
+            }
         } catch (e: Exception) {
             Log.e("MediaStoreProvider", "Failed to register MediaStore content observer", e)
         }

@@ -207,6 +207,7 @@ class CryptoKeystoreManager {
             put("port", port)
             put("certFp", getCertificateFingerprintSha256())
             put("nonce", activeEphemeralNonce)
+            put("code", PairingManager.pairingCode) // scanned QR pairs without typing
         }.toString()
     }
 

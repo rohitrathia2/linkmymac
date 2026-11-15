@@ -3,25 +3,38 @@ package com.linkmymac.android.service
 import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
+import android.app.PendingIntent
 import android.app.Service
 import android.content.ComponentName
+import android.content.ContentUris
+import android.content.ContentValues
 import android.content.Context
 import android.content.Intent
 import android.content.pm.ServiceInfo
+import android.net.Uri
 import android.net.nsd.NsdManager
 import android.net.nsd.NsdServiceInfo
 import android.os.BatteryManager
 import android.os.Build
+import android.os.Environment
 import android.os.IBinder
+import android.provider.MediaStore
+import android.provider.OpenableColumns
+import android.util.Base64
 import android.util.Log
+import com.linkmymac.android.crypto.PairingManager
 import org.json.JSONObject
 import java.io.DataInputStream
 import java.io.DataOutputStream
+import java.io.InputStream
+import java.io.OutputStream
 import java.net.ServerSocket
 import java.net.Socket
 import java.nio.ByteBuffer
+import java.util.UUID
 import java.util.concurrent.CopyOnWriteArrayList
 import java.util.concurrent.Executors
+import java.util.concurrent.RejectedExecutionException
 import java.util.concurrent.atomic.AtomicBoolean
 
 /**
@@ -55,6 +68,11 @@ class P2PDaemonService : Service() {
         const val DEFAULT_PORT = 8765
         private const val MAGIC_HEADER: Short = 0x4C4D // "LM"
         private const val FLAG_JSON_FRAME: Short = 0x0001
+        private const val TAG = "P2PDaemonService"
+        private const val MAX_SESSIONS = 8 // caps threads an unauthenticated flood can pin
+        private const val PRE_AUTH_TIMEOUT_MS = 30_000
+        private const val FILE_CHUNK_BYTES = 64 * 1024
+        private const val FILES_CHANNEL_ID = "linkmymac_files"
 
         @Volatile
         var instance: P2PDaemonService? = null
@@ -72,11 +90,12 @@ class P2PDaemonService : Service() {
         /** Thread-safe list of active connected Mac client sessions */
         private val activeClients = CopyOnWriteArrayList<ClientSession>()
 
+        /** Paired Macs only: a socket that hasn't passed the handshake isn't "connected". */
         val connectedClientCount: Int
-            get() = activeClients.size
+            get() = activeClients.count { it.authenticated }
 
         val isMacConnected: Boolean
-            get() = activeClients.isNotEmpty()
+            get() = connectedClientCount > 0
 
         /** Callback invoked on the main thread whenever a Mac connects or disconnects */
         @Volatile
@@ -96,9 +115,33 @@ class P2PDaemonService : Service() {
          */
         fun broadcastControlFrame(json: JSONObject) {
             val payloadBytes = json.toString().toByteArray(Charsets.UTF_8)
+            // Every subsystem routes through here, so this one check keeps notifications,
+            // clipboard, camera frames etc. away from sockets that haven't paired.
             activeClients.forEach { session ->
-                session.sendFrame(FLAG_JSON_FRAME, payloadBytes)
+                if (session.authenticated) session.sendFrame(FLAG_JSON_FRAME, payloadBytes)
             }
+        }
+
+        /** After "Forget paired Macs": drop live sessions so they must pair again. */
+        fun disconnectAllClients() {
+            activeClients.forEach { it.close() }
+        }
+
+        /**
+         * Sends content URIs (share sheet / file picker) to the paired Mac.
+         * Streams are opened right here, while the caller's URI grant is still valid,
+         * then copied on a background thread. Returns false if no paired Mac is connected.
+         */
+        fun sendFilesToMac(uris: List<Uri>): Boolean {
+            val service = instance ?: return false
+            // ponytail: first paired Mac only; add a target picker if people pair several.
+            val session = activeClients.firstOrNull { it.authenticated } ?: return false
+            val files = uris.mapNotNull { service.openForSending(it) }
+            if (files.isEmpty()) return false
+            service.ioExecutor.execute {
+                files.forEach { session.streamFile(UUID.randomUUID().toString(), it) }
+            }
+            return true
         }
 
         /**
@@ -277,11 +320,14 @@ class P2PDaemonService : Service() {
                 serverSocket = ServerSocket(port)
                 while (running.get()) {
                     val clientSocket = serverSocket?.accept() ?: break
+                    if (activeClients.size >= MAX_SESSIONS) {
+                        clientSocket.close()
+                        continue
+                    }
                     clientSocket.tcpNoDelay = true
+                    clientSocket.soTimeout = PRE_AUTH_TIMEOUT_MS // cleared once the Mac authenticates
                     val session = ClientSession(clientSocket)
                     activeClients.add(session)
-                    val count = activeClients.size
-                    onClientCountChanged?.invoke(count)
                     ioExecutor.execute(session)
                 }
             } catch (_: Exception) {
@@ -353,6 +399,15 @@ class P2PDaemonService : Service() {
         private val writeLock = Any()
         private val sendExecutor = Executors.newSingleThreadExecutor()
 
+        /** Set once the Mac proves it is paired; until then every other frame is dropped. */
+        @Volatile
+        var authenticated = false
+            private set
+        private val nonce = PairingManager.newNonce()
+
+        /** Files being received from the Mac. Touched only by this session's read thread. */
+        private val incomingFiles = HashMap<String, IncomingFile>()
+
         /**
          * ---------------------------------------------------------------------
          * run: Inbound Stream Parsing Loop
@@ -370,6 +425,11 @@ class P2PDaemonService : Service() {
          */
         override fun run() {
             try {
+                sendJson(JSONObject()
+                    .put("type", "AUTH_CHALLENGE")
+                    .put("phoneId", PairingManager.phoneId(this@P2PDaemonService))
+                    .put("phoneName", "${Build.MANUFACTURER} ${Build.MODEL}")
+                    .put("nonce", nonce))
                 while (running.get() && !socket.isClosed) {
                     val magic = input.readShort()
                     if (magic != MAGIC_HEADER) {
@@ -389,10 +449,10 @@ class P2PDaemonService : Service() {
                 Log.e("P2PDaemonService", "ClientSession exception in read loop", e)
             } finally {
                 close()
+                incomingFiles.keys.toList().forEach { discardIncoming(it, "Connection lost", notifyMac = false) }
                 activeClients.remove(this)
-                val count = activeClients.size
-                onClientCountChanged?.invoke(count)
-                if (activeClients.isEmpty()) {
+                onClientCountChanged?.invoke(connectedClientCount)
+                if (connectedClientCount == 0) {
                     cameraProvider.stopStream()
                 }
             }
@@ -421,17 +481,17 @@ class P2PDaemonService : Service() {
             val frameType = json.optString("type")
             Log.d("P2PDaemonService", "handleIncomingFrame: type=$frameType")
 
+            // Until the Mac proves it's paired, the handshake is the only frame we act on.
+            if (!authenticated) {
+                if (frameType == "PAIRING_HANDSHAKE") handlePairingHandshake(json)
+                return
+            }
+
             when (frameType) {
-                // Handshake acknowledgment & instant notification priming
-                "PAIRING_HANDSHAKE" -> {
-                    val ack = JSONObject().apply {
-                        put("type", "PAIRING_ACK")
-                        put("accepted", true)
-                        put("deviceName", "${Build.MANUFACTURER} ${Build.MODEL}")
-                    }
-                    sendFrame(FLAG_JSON_FRAME, ack.toString().toByteArray(Charsets.UTF_8))
-                    LMMNotificationListener.instance?.syncActiveNotifications()
-                }
+                // Mac → phone file sharing (saved to Download/LinkMyMac)
+                "FILE_OFFER" -> beginIncoming(json)
+                "FILE_CHUNK" -> appendIncoming(json)
+                "FILE_TRANSFER_COMPLETE" -> finishIncoming(json)
 
                 // Explicit manual or reconnect notification sync request
                 "NOTIFICATIONS_SYNC_REQUEST" -> {
@@ -517,8 +577,10 @@ class P2PDaemonService : Service() {
                 "MEDIA_DOWNLOAD_REQUEST" -> {
                     val mediaId = json.optLong("mediaId")
                     val transferId = json.optString("transferId")
-                    mediaProvider.streamMediaFileInChunks(mediaId, transferId) { chunkJson ->
-                        sendFrame(FLAG_JSON_FRAME, chunkJson.toString().toByteArray(Charsets.UTF_8))
+                    openForSending(mediaProvider.contentUriFor(mediaId))?.let { file ->
+                        // Keep the Mac's media_<id>.<ext> naming so it recognises earlier downloads.
+                        val named = file.copy(name = "$transferId.${file.name.substringAfterLast('.', "jpg")}")
+                        ioExecutor.execute { streamFile(transferId, named) }
                     }
                 }
 
@@ -570,23 +632,168 @@ class P2PDaemonService : Service() {
          * ---------------------------------------------------------------------
          */
         fun sendFrame(flags: Short, payload: ByteArray) {
-            sendExecutor.execute {
-                synchronized(writeLock) {
+            try {
+                sendExecutor.execute {
                     try {
-                        val header = ByteBuffer.allocate(8)
-                            .putShort(MAGIC_HEADER)
-                            .putShort(flags)
-                            .putInt(payload.size)
-                            .array()
-                        output.write(header)
-                        output.write(payload)
-                        output.flush()
+                        writeFrame(flags, payload)
                     } catch (e: Exception) {
-                        Log.e("P2PDaemonService", "sendFrame failed, closing session: ${e.message}")
+                        Log.e(TAG, "sendFrame failed, closing session: ${e.message}")
                         close()
                     }
                 }
+            } catch (_: RejectedExecutionException) {
+                // Session already closed; its read loop is tearing it down.
             }
+        }
+
+        private fun writeFrame(flags: Short, payload: ByteArray) {
+            synchronized(writeLock) {
+                val header = ByteBuffer.allocate(8)
+                    .putShort(MAGIC_HEADER)
+                    .putShort(flags)
+                    .putInt(payload.size)
+                    .array()
+                output.write(header)
+                output.write(payload)
+                output.flush()
+            }
+        }
+
+        private fun sendJson(json: JSONObject) =
+            sendFrame(FLAG_JSON_FRAME, json.toString().toByteArray(Charsets.UTF_8))
+
+        /** Blocking send for bulk streams: TCP backpressure paces the reader, nothing queues up in RAM. */
+        private fun sendJsonNow(json: JSONObject) {
+            try {
+                writeFrame(FLAG_JSON_FRAME, json.toString().toByteArray(Charsets.UTF_8))
+            } catch (e: Exception) {
+                close()
+                throw e
+            }
+        }
+
+        private fun handlePairingHandshake(json: JSONObject) {
+            val result = PairingManager.authenticate(
+                this@P2PDaemonService,
+                deviceId = json.optString("deviceId"),
+                nonce = nonce,
+                proof = json.optString("proof"),
+                code = json.optString("pairingCode"),
+                macPublicKey = json.optString("macPublicKey")
+            )
+            val ack = JSONObject()
+                .put("type", "PAIRING_ACK")
+                .put("deviceName", "${Build.MANUFACTURER} ${Build.MODEL}")
+            when (result) {
+                is PairingManager.Result.Rejected -> {
+                    sendJson(ack.put("accepted", false).put("error", result.reason))
+                    return
+                }
+                is PairingManager.Result.Accepted -> {
+                    // Prove we hold the same secret, so the Mac knows this is the real phone.
+                    ack.put("accepted", true)
+                        .put("proof", PairingManager.proof(result.secret, "phone", json.optString("macNonce")))
+                    result.phonePublicKey?.let { ack.put("phonePublicKey", it) }
+                }
+            }
+            sendJson(ack) // queued before any broadcast can reach this session
+            authenticated = true
+            socket.soTimeout = 0
+            Log.i(TAG, "Mac \"${json.optString("deviceName")}\" authenticated")
+            onClientCountChanged?.invoke(connectedClientCount)
+            LMMNotificationListener.instance?.syncActiveNotifications()
+        }
+
+        /** Phone → Mac: FILE_OFFER, 64 KB FILE_CHUNKs, FILE_TRANSFER_COMPLETE. */
+        fun streamFile(transferId: String, file: OutgoingFile) {
+            try {
+                file.input.use { input ->
+                    sendJsonNow(JSONObject()
+                        .put("type", "FILE_OFFER")
+                        .put("transferId", transferId)
+                        .put("fileName", file.name)
+                        .put("mimeType", file.mime)
+                        .put("totalBytes", file.size))
+                    val buffer = ByteArray(FILE_CHUNK_BYTES)
+                    var index = 0
+                    while (true) {
+                        val n = input.readChunk(buffer)
+                        if (n == 0) break
+                        sendJsonNow(JSONObject()
+                            .put("type", "FILE_CHUNK")
+                            .put("transferId", transferId)
+                            .put("chunkIndex", index++)
+                            .put("dataBase64", Base64.encodeToString(buffer, 0, n, Base64.NO_WRAP)))
+                        if (n < buffer.size) break
+                    }
+                    sendJsonNow(JSONObject()
+                        .put("type", "FILE_TRANSFER_COMPLETE")
+                        .put("transferId", transferId)
+                        .put("totalChunks", index))
+                }
+            } catch (e: Exception) {
+                Log.w(TAG, "File transfer $transferId failed: ${e.message}")
+            }
+        }
+
+        // Mac → phone: written straight into a pending MediaStore Downloads row.
+        private fun beginIncoming(json: JSONObject) {
+            val id = json.optString("transferId")
+            if (id.isEmpty() || incomingFiles.containsKey(id)) return
+            val name = safeFileName(json.optString("fileName"))
+            val mime = json.optString("mimeType").ifBlank { "application/octet-stream" }
+            val values = ContentValues().apply {
+                put(MediaStore.MediaColumns.DISPLAY_NAME, name)
+                put(MediaStore.MediaColumns.MIME_TYPE, mime)
+                put(MediaStore.MediaColumns.RELATIVE_PATH, "${Environment.DIRECTORY_DOWNLOADS}/LinkMyMac")
+                put(MediaStore.MediaColumns.IS_PENDING, 1)
+            }
+            val uri = try {
+                contentResolver.insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, values)
+            } catch (_: Exception) {
+                null
+            }
+            val out = uri?.let { try { contentResolver.openOutputStream(it) } catch (_: Exception) { null } }
+            if (uri == null || out == null) {
+                uri?.let { contentResolver.delete(it, null, null) }
+                sendJson(transferResult(id, ok = false, error = "Phone could not create the file"))
+                return
+            }
+            incomingFiles[id] = IncomingFile(uri, out, name, mime)
+        }
+
+        private fun appendIncoming(json: JSONObject) {
+            val id = json.optString("transferId")
+            val file = incomingFiles[id] ?: return
+            try {
+                check(json.optInt("chunkIndex", -1) == file.nextChunk) { "Chunk out of order" }
+                file.out.write(Base64.decode(json.optString("dataBase64"), Base64.NO_WRAP))
+                file.nextChunk++
+            } catch (e: Exception) {
+                discardIncoming(id, e.message ?: "Write failed", notifyMac = true)
+            }
+        }
+
+        private fun finishIncoming(json: JSONObject) {
+            val id = json.optString("transferId")
+            val file = incomingFiles[id] ?: return
+            try {
+                check(json.optInt("totalChunks", -1) == file.nextChunk) { "Missing chunks" }
+                file.out.close()
+                contentResolver.update(file.uri, ContentValues().apply { put(MediaStore.MediaColumns.IS_PENDING, 0) }, null, null)
+                incomingFiles.remove(id)
+                sendJson(transferResult(id, ok = true, error = null))
+                notifyFileReceived(file)
+            } catch (e: Exception) {
+                discardIncoming(id, e.message ?: "Save failed", notifyMac = true)
+            }
+        }
+
+        private fun discardIncoming(id: String, reason: String, notifyMac: Boolean) {
+            val file = incomingFiles.remove(id) ?: return
+            try { file.out.close() } catch (_: Exception) {}
+            try { contentResolver.delete(file.uri, null, null) } catch (_: Exception) {}
+            if (notifyMac) sendJson(transferResult(id, ok = false, error = reason))
         }
 
         /**
@@ -603,4 +810,80 @@ class P2PDaemonService : Service() {
             try { socket.close() } catch (_: Exception) {}
         }
     }
+
+    // =========================================================================
+    // File sharing helpers
+    // =========================================================================
+
+    data class OutgoingFile(val name: String, val mime: String, val size: Long, val input: InputStream)
+
+    private class IncomingFile(val uri: Uri, val out: OutputStream, val name: String, val mime: String) {
+        var nextChunk = 0
+    }
+
+    /** Opens a content URI for streaming, with its display name and size (size -1 if unknown). */
+    private fun openForSending(uri: Uri): OutgoingFile? = try {
+        var name = uri.lastPathSegment ?: "file"
+        var size = -1L
+        contentResolver.query(uri, arrayOf(OpenableColumns.DISPLAY_NAME, OpenableColumns.SIZE), null, null, null)?.use { c ->
+            if (c.moveToFirst()) {
+                val nameIdx = c.getColumnIndex(OpenableColumns.DISPLAY_NAME)
+                val sizeIdx = c.getColumnIndex(OpenableColumns.SIZE)
+                if (nameIdx >= 0) c.getString(nameIdx)?.let { name = it }
+                if (sizeIdx >= 0 && !c.isNull(sizeIdx)) size = c.getLong(sizeIdx)
+            }
+        }
+        contentResolver.openInputStream(uri)?.let { input ->
+            OutgoingFile(name, contentResolver.getType(uri) ?: "application/octet-stream", size, input)
+        }
+    } catch (e: Exception) {
+        Log.w(TAG, "Cannot open $uri for sending: ${e.message}")
+        null
+    }
+
+    private fun transferResult(id: String, ok: Boolean, error: String?): JSONObject = JSONObject()
+        .put("type", "FILE_TRANSFER_RESULT")
+        .put("transferId", id)
+        .put("ok", ok)
+        .apply { error?.let { put("error", it) } }
+
+    /** The name comes from the network: keep only a plain file name. */
+    private fun safeFileName(raw: String): String =
+        raw.substringAfterLast('/').substringAfterLast('\\')
+            .filter { it >= ' ' }
+            .trim().trimStart('.')
+            .take(200)
+            .ifEmpty { "file" }
+
+    private fun notifyFileReceived(file: IncomingFile) {
+        val nm = getSystemService(NotificationManager::class.java)
+        nm.createNotificationChannel(
+            NotificationChannel(FILES_CHANNEL_ID, "Files from Mac", NotificationManager.IMPORTANCE_DEFAULT)
+        )
+        val notificationId = 10_000 + (ContentUris.parseId(file.uri) % 1_000_000).toInt()
+        val view = Intent(Intent.ACTION_VIEW)
+            .setDataAndType(file.uri, file.mime)
+            .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_ACTIVITY_NEW_TASK)
+        val tap = PendingIntent.getActivity(
+            this, notificationId, view, PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
+        )
+        nm.notify(notificationId, Notification.Builder(this, FILES_CHANNEL_ID)
+            .setSmallIcon(android.R.drawable.stat_sys_download_done)
+            .setContentTitle("Received from Mac")
+            .setContentText("${file.name} • saved to Download/LinkMyMac")
+            .setContentIntent(tap)
+            .setAutoCancel(true)
+            .build())
+    }
+}
+
+/** Fills [buffer] unless the stream ends first; returns the byte count (0 at EOF). */
+private fun InputStream.readChunk(buffer: ByteArray): Int {
+    var filled = 0
+    while (filled < buffer.size) {
+        val n = read(buffer, filled, buffer.size - filled)
+        if (n < 0) break
+        filled += n
+    }
+    return filled
 }

@@ -1,5 +1,6 @@
 import SwiftUI
 import AppKit
+import AVKit
 @preconcurrency import AVFoundation
 import CoreImage
 import CoreMedia
@@ -39,7 +40,29 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         sub.startClipboardMonitor()
         self.subsystems = sub
 
-        MacP2PClient.shared.connectDirect(host: "127.0.0.1", port: 8765)
+        MacP2PClient.shared.reconnect() // last used host; USB tunnel (127.0.0.1) by default
+    }
+
+    /// Files dropped on the Dock icon (or `open -a LinkMyMac file`) go to the phone.
+    func application(_ application: NSApplication, open urls: [URL]) {
+        let files = urls.filter(\.isFileURL)
+        if !files.isEmpty {
+            MacP2PClient.shared.sendFiles(files)
+        }
+    }
+}
+
+/// NSOpenPanel → phone. Shared by the File Sharing tab and the menu bar.
+@MainActor
+func chooseFilesAndSend(to client: MacP2PClient) {
+    let panel = NSOpenPanel()
+    panel.title = "Send Files to Phone"
+    panel.prompt = "Send"
+    panel.allowsMultipleSelection = true
+    panel.canChooseDirectories = false
+    NSApp.activate(ignoringOtherApps: true)
+    if panel.runModal() == .OK {
+        client.sendFiles(panel.urls)
     }
 }
 
@@ -80,6 +103,11 @@ struct LinkMyMacApp: App {
                     p2pClient.requestMediaIndex(offset: 0, limit: 30)
                 }
 
+                Button("Send Files to Phone…") {
+                    chooseFilesAndSend(to: p2pClient)
+                }
+                .disabled(!p2pClient.isPaired)
+
                 Divider()
 
                 Button("Quit UniBridge") {
@@ -98,7 +126,8 @@ struct LinkMyMacApp: App {
  */
 enum DashboardTab: String, CaseIterable, Identifiable {
     case notifications = "Notifications"
-    case photos = "Photos & AirDrop"
+    case photos = "Photos & Videos"
+    case files = "File Sharing"
     case camera = "FaceTime Camera"
     case clipboard = "Universal Clipboard"
     case qrPairing = "QR Code Pairing"
@@ -109,6 +138,7 @@ enum DashboardTab: String, CaseIterable, Identifiable {
         switch self {
         case .notifications: return "bell.badge.fill"
         case .photos: return "photo.on.rectangle.angled"
+        case .files: return "arrow.up.arrow.down.circle.fill"
         case .camera: return "video.fill"
         case .clipboard: return "doc.on.clipboard.fill"
         case .qrPairing: return "qrcode.viewfinder"
@@ -145,7 +175,9 @@ struct DashboardView: View {
     @State private var selectedTab: DashboardTab = .notifications
 
     // Sub-view UI States
-    @State private var manualHost: String = "192.168.1.8"
+    @State private var manualHost: String = UserDefaults.standard.string(forKey: MacP2PClient.lastHostKey) ?? "127.0.0.1"
+    @State private var pairingCodeInput: String = ""
+    @State private var isDropTargeted: Bool = false
     @State private var manualPort: String = "8765"
     @State private var replyTexts: [String: String] = [:]
     @State private var customClipboardInput: String = ""
@@ -180,7 +212,7 @@ struct DashboardView: View {
             PhotoDetailPreviewSheet(item: item, p2pClient: p2pClient)
         }
         .confirmationDialog(
-            "Permanently Delete Photo?",
+            itemPendingDeletion?.isVideo == true ? "Permanently Delete Video?" : "Permanently Delete Photo?",
             isPresented: $showDeleteConfirmation,
             titleVisibility: .visible
         ) {
@@ -194,7 +226,7 @@ struct DashboardView: View {
                 itemPendingDeletion = nil
             }
         } message: {
-            Text("This photo will be permanently removed from your Android device's MediaStore and storage.")
+            Text("It will be permanently removed from your Android device's storage.")
         }
     }
 
@@ -237,9 +269,9 @@ struct DashboardView: View {
             VStack(alignment: .leading, spacing: 10) {
                 HStack(spacing: 8) {
                     Circle()
-                        .fill(p2pClient.connectedDeviceName != nil ? Color.green : Color.orange)
+                        .fill(p2pClient.isPaired ? Color.green : Color.orange)
                         .frame(width: 10, height: 10)
-                        .shadow(color: p2pClient.connectedDeviceName != nil ? Color.green.opacity(0.6) : Color.clear, radius: 4)
+                        .shadow(color: p2pClient.isPaired ? Color.green.opacity(0.6) : Color.clear, radius: 4)
 
                     VStack(alignment: .leading, spacing: 2) {
                         Text(p2pClient.connectedDeviceName ?? "Searching for Android...")
@@ -273,7 +305,7 @@ struct DashboardView: View {
                     Label(
                         p2pClient.connectedDeviceName != nil
                             ? (p2pClient.isWirelessConnection ? "Wi-Fi LAN Active" : "USB Tunnel Active")
-                            : (p2pClient.discoveredPeers.first != nil ? "Wi-Fi Device Found" : "192.168.1.8:8765"),
+                            : (p2pClient.discoveredPeers.first != nil ? "Wi-Fi Device Found" : p2pClient.directEndpointLabel),
                         systemImage: p2pClient.isWirelessConnection ? "wifi" : "cable.connector"
                     )
                     .font(.caption2.bold())
@@ -289,18 +321,37 @@ struct DashboardView: View {
                         .controlSize(.mini)
                     } else {
                         Button {
-                            if let peer = p2pClient.discoveredPeers.first {
-                                p2pClient.connect(to: peer)
-                            } else {
-                                p2pClient.connectDirect(host: "192.168.1.8", port: 8765)
-                            }
+                            p2pClient.reconnect()
                         } label: {
                             Image(systemName: "arrow.clockwise")
                                 .font(.caption2)
                         }
                         .buttonStyle(.plain)
-                        .help("Reconnect Wirelessly via Local Wi-Fi")
+                        .help("Reconnect (Wi-Fi if the phone is visible, otherwise \(p2pClient.directEndpointLabel))")
                     }
+                }
+
+                if p2pClient.needsPairingCode {
+                    VStack(alignment: .leading, spacing: 6) {
+                        Text("Enter the code shown in LinkMyMac on your phone")
+                            .font(.caption2)
+                            .foregroundColor(.secondary)
+                        HStack(spacing: 6) {
+                            TextField("ABC 123", text: $pairingCodeInput)
+                                .textFieldStyle(.roundedBorder)
+                                .font(.system(.body, design: .monospaced))
+                                .onSubmit(submitPairingCode)
+                            Button("Pair", action: submitPairingCode)
+                                .buttonStyle(.borderedProminent)
+                                .controlSize(.small)
+                                .disabled(normalizedPairingCode.count < 6)
+                        }
+                    }
+                }
+                if let error = p2pClient.pairingError {
+                    Text(error)
+                        .font(.caption2)
+                        .foregroundColor(.red)
                 }
             }
             .padding(12)
@@ -339,6 +390,16 @@ struct DashboardView: View {
                                 Text("\(total)")
                                     .font(.caption2)
                                     .foregroundColor(.secondary)
+                            }
+                        case .files:
+                            let active = p2pClient.transfers.filter { $0.status == .inProgress }.count
+                            if active > 0 {
+                                Text("\(active)")
+                                    .font(.caption2.bold())
+                                    .foregroundColor(.white)
+                                    .padding(.horizontal, 7)
+                                    .padding(.vertical, 2)
+                                    .background(Capsule().fill(Color.teal))
                             }
                         case .camera:
                             if p2pClient.isCameraStreaming {
@@ -415,6 +476,8 @@ struct DashboardView: View {
             notificationsDetailView
         case .photos:
             photosDetailView
+        case .files:
+            filesDetailView
         case .camera:
             cameraDetailView
         case .clipboard:
@@ -661,7 +724,7 @@ struct DashboardView: View {
                     Image(systemName: "magnifyingglass")
                         .font(.caption)
                         .foregroundColor(.secondary)
-                    TextField("Search photos...", text: $photoSearchText)
+                    TextField("Search photos & videos...", text: $photoSearchText)
                         .textFieldStyle(.plain)
                         .font(.caption)
                         .frame(width: 140)
@@ -709,7 +772,7 @@ struct DashboardView: View {
                     Image(systemName: "photo.on.rectangle.angled")
                         .font(.system(size: 48))
                         .foregroundColor(.secondary.opacity(0.6))
-                    Text("No Photos Found")
+                    Text("No Photos or Videos Found")
                         .font(.title3.bold())
                     Text("Click 'Sync All Gallery' above to index all photos and videos from your Android device.")
                         .font(.caption)
@@ -765,6 +828,17 @@ struct DashboardView: View {
                             .overlay(Image(systemName: "photo").font(.largeTitle).foregroundColor(.gray))
                     }
                 }
+                .overlay(alignment: .bottomLeading) {
+                    if item.isVideo {
+                        Label(formatDuration(item.durationMs), systemImage: "play.fill")
+                            .font(.caption2.bold())
+                            .foregroundColor(.white)
+                            .padding(.horizontal, 6)
+                            .padding(.vertical, 3)
+                            .background(Capsule().fill(Color.black.opacity(0.6)))
+                            .padding(6)
+                    }
+                }
                 .cornerRadius(10)
                 .contentShape(Rectangle())
                 .onTapGesture {
@@ -787,6 +861,10 @@ struct DashboardView: View {
                 Text("\(formatBytes(item.sizeBytes)) • \(item.width)×\(item.height)")
                     .font(.caption2)
                     .foregroundColor(.secondary)
+                if let download = mediaDownload(for: item) {
+                    ProgressView(value: Double(download.bytesTransferred), total: Double(max(download.totalBytes, 1)))
+                        .controlSize(.small)
+                }
             }
 
             // Action Toolbar
@@ -799,7 +877,7 @@ struct DashboardView: View {
                 .buttonStyle(.plain)
                 .font(.system(size: 18))
                 .foregroundColor(.blue)
-                .help("Download Full Resolution Photo to ~/Downloads")
+                .help(item.isVideo ? "Download Video to ~/Downloads" : "Download Full Resolution Photo to ~/Downloads")
 
                 Button {
                     shareMediaItem(item)
@@ -1349,21 +1427,9 @@ struct DashboardView: View {
                             .buttonStyle(.borderedProminent)
                             .controlSize(.large)
                         } else {
-                            HStack {
-                                Text("Target IP:")
-                                    .font(.subheadline.bold())
-                                Text("192.168.1.8:8765")
-                                    .font(.system(.subheadline, design: .monospaced))
-                                    .foregroundColor(.cyan)
-                            }
-
-                            Button {
-                                p2pClient.connectDirect(host: "192.168.1.8", port: 8765)
-                            } label: {
-                                Label("Connect Wirelessly to 192.168.1.8", systemImage: "wifi")
-                            }
-                            .buttonStyle(.borderedProminent)
-                            .controlSize(.large)
+                            Text("No phone found via Bonjour yet. Check both devices are on the same Wi-Fi, or enter the phone's IP under Manual IP below.")
+                                .font(.caption)
+                                .foregroundColor(.secondary)
                         }
                     }
                     .frame(maxWidth: .infinity, alignment: .leading)
@@ -1480,6 +1546,149 @@ struct DashboardView: View {
     }
 
     // =========================================================================
+    // File Sharing: drop zone + transfer list (both directions)
+    // =========================================================================
+    private var filesDetailView: some View {
+        VStack(spacing: 0) {
+            HStack(spacing: 12) {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("File Sharing")
+                        .font(.title2.bold())
+                    Text("Files you send land in the phone's Download/LinkMyMac folder. Files shared from the phone land in ~/Downloads.")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                }
+                Spacer()
+                if p2pClient.transfers.contains(where: { $0.status != .inProgress }) {
+                    Button("Clear Finished") { p2pClient.clearFinishedTransfers() }
+                        .buttonStyle(.bordered)
+                }
+            }
+            .padding(.horizontal, 20)
+            .padding(.vertical, 14)
+            .background(Color(NSColor.controlBackgroundColor).opacity(0.6))
+
+            Divider()
+
+            ScrollView {
+                VStack(spacing: 16) {
+                    VStack(spacing: 10) {
+                        Image(systemName: "square.and.arrow.up.on.square")
+                            .font(.system(size: 34))
+                            .foregroundColor(isDropTargeted ? .accentColor : .secondary)
+                        Text(p2pClient.isPaired
+                             ? "Drop files here to send them to \(p2pClient.connectedDeviceName ?? "your phone")"
+                             : "Connect and pair your phone to send files")
+                            .font(.headline)
+                        Text("On the phone: Share → LinkMyMac Companion, or “Send Files to Mac” in the app.")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                        Button {
+                            chooseFilesAndSend(to: p2pClient)
+                        } label: {
+                            Label("Choose Files…", systemImage: "folder")
+                        }
+                        .buttonStyle(.borderedProminent)
+                        .disabled(!p2pClient.isPaired)
+                    }
+                    .frame(maxWidth: .infinity)
+                    .padding(28)
+                    .background(
+                        RoundedRectangle(cornerRadius: 14)
+                            .fill(isDropTargeted ? Color.accentColor.opacity(0.12) : Color.secondary.opacity(0.06))
+                    )
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 14)
+                            .strokeBorder(style: StrokeStyle(lineWidth: 2, dash: [7]))
+                            .foregroundColor(isDropTargeted ? .accentColor : Color.secondary.opacity(0.4))
+                    )
+                    .dropDestination(for: URL.self) { urls, _ in
+                        guard p2pClient.isPaired else { return false }
+                        p2pClient.sendFiles(urls)
+                        return true
+                    } isTargeted: { isDropTargeted = $0 }
+
+                    if p2pClient.transfers.isEmpty {
+                        Text("No transfers yet")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                            .padding(.top, 8)
+                    } else {
+                        VStack(spacing: 8) {
+                            ForEach(p2pClient.transfers) { transfer in
+                                transferRow(transfer)
+                            }
+                        }
+                    }
+                }
+                .padding(20)
+            }
+        }
+    }
+
+    private func transferRow(_ transfer: FileTransfer) -> some View {
+        HStack(spacing: 12) {
+            Image(systemName: transfer.direction == .toPhone ? "arrow.up.circle.fill" : "arrow.down.circle.fill")
+                .font(.title2)
+                .foregroundColor(transfer.direction == .toPhone ? .blue : .green)
+
+            VStack(alignment: .leading, spacing: 4) {
+                Text(transfer.name)
+                    .font(.subheadline.bold())
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                switch transfer.status {
+                case .inProgress:
+                    if transfer.totalBytes > 0 {
+                        ProgressView(value: Double(min(transfer.bytesTransferred, transfer.totalBytes)),
+                                     total: Double(transfer.totalBytes))
+                        Text("\(formatBytes(transfer.bytesTransferred)) of \(formatBytes(transfer.totalBytes))")
+                            .font(.caption2)
+                            .foregroundColor(.secondary)
+                    } else {
+                        ProgressView().progressViewStyle(.linear)
+                    }
+                case .done:
+                    Text(transfer.direction == .toPhone
+                         ? "Saved on phone • \(formatBytes(transfer.totalBytes))"
+                         : "Saved to Downloads • \(formatBytes(transfer.bytesTransferred))")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                case .failed(let reason):
+                    Text("Failed: \(reason)")
+                        .font(.caption)
+                        .foregroundColor(.red)
+                }
+            }
+
+            Spacer()
+
+            if let url = transfer.localURL {
+                Button { NSWorkspace.shared.open(url) } label: { Image(systemName: "eye") }
+                    .buttonStyle(.borderless)
+                    .help("Open")
+                Button { NSWorkspace.shared.activateFileViewerSelecting([url]) } label: { Image(systemName: "folder") }
+                    .buttonStyle(.borderless)
+                    .help("Show in Finder")
+            }
+        }
+        .padding(12)
+        .background(Color.secondary.opacity(0.06))
+        .cornerRadius(10)
+    }
+
+    /// Letters and digits only, so "abc 123" and "ABC-123" both work.
+    private var normalizedPairingCode: String {
+        pairingCodeInput.filter { $0.isLetter || $0.isNumber }.uppercased()
+    }
+
+    private func submitPairingCode() {
+        guard normalizedPairingCode.count >= 6 else { return }
+        p2pClient.submitPairingCode(normalizedPairingCode)
+        pairingCodeInput = ""
+    }
+
+    // =========================================================================
     // Helpers
     // =========================================================================
 
@@ -1487,6 +1696,7 @@ struct DashboardView: View {
         switch tab {
         case .notifications: return .red
         case .photos: return .blue
+        case .files: return .teal
         case .camera: return .green
         case .clipboard: return .purple
         case .qrPairing: return .orange
@@ -1524,12 +1734,22 @@ struct DashboardView: View {
         return formatter.string(fromByteCount: bytes)
     }
 
+    /// "1:05" or "1:02:03"
+    private func formatDuration(_ ms: Int64) -> String {
+        Duration.milliseconds(ms).formatted(.time(pattern: ms >= 3_600_000 ? .hourMinuteSecond : .minuteSecond))
+    }
+
+    /// The in-flight download of a gallery item, if any (media downloads reuse the file transfer list).
+    private func mediaDownload(for item: RemoteMediaItem) -> FileTransfer? {
+        p2pClient.transfers.first { $0.id == "media_\(item.id)" && $0.status == .inProgress }
+    }
+
     private func shareMediaItem(_ item: RemoteMediaItem) {
         var itemsToShare: [Any] = []
         if let localUrl = p2pClient.localFileURL(for: item.id) {
             itemsToShare.append(localUrl)
-        } else if let data = item.thumbnailData, let img = NSImage(data: data) {
-            itemsToShare.append(img)
+        } else if !item.isVideo, let data = item.thumbnailData, let img = NSImage(data: data) {
+            itemsToShare.append(img) // a video's thumbnail isn't the video: download it first instead
         } else {
             p2pClient.downloadFullResolutionMedia(mediaId: item.id)
             return
@@ -1572,6 +1792,12 @@ struct PhotoDetailPreviewSheet: View {
     let item: RemoteMediaItem
     @ObservedObject var p2pClient: MacP2PClient
     @Environment(\.dismiss) private var dismiss
+    /// Built once per downloaded video; making it inside `body` would restart playback on every re-render.
+    @State private var player: AVPlayer?
+
+    private var download: FileTransfer? {
+        p2pClient.transfers.first { $0.id == "media_\(item.id)" && $0.status == .inProgress }
+    }
 
     var body: some View {
         VStack(spacing: 12) {
@@ -1597,8 +1823,12 @@ struct PhotoDetailPreviewSheet: View {
                 Color.black.opacity(0.9)
                     .cornerRadius(12)
 
-                if let localUrl = p2pClient.localFileURL(for: item.id),
-                   let img = NSImage(contentsOf: localUrl) {
+                if let player {
+                    VideoPlayer(player: player)
+                        .padding(8)
+                } else if !item.isVideo,
+                          let localUrl = p2pClient.localFileURL(for: item.id),
+                          let img = NSImage(contentsOf: localUrl) {
                     Image(nsImage: img)
                         .resizable()
                         .scaledToFit()
@@ -1609,6 +1839,13 @@ struct PhotoDetailPreviewSheet: View {
                         .resizable()
                         .scaledToFit()
                         .padding(8)
+                        .overlay {
+                            if item.isVideo {
+                                Image(systemName: "play.circle.fill")
+                                    .font(.system(size: 54))
+                                    .foregroundColor(.white.opacity(0.85))
+                            }
+                        }
                 }
             }
             .frame(minWidth: 480, minHeight: 360)
@@ -1618,9 +1855,15 @@ struct PhotoDetailPreviewSheet: View {
                 Button {
                     p2pClient.downloadFullResolutionMedia(mediaId: item.id)
                 } label: {
-                    Label("Download Full Resolution", systemImage: "arrow.down.circle")
+                    Label(item.isVideo ? "Download Video" : "Download Full Resolution", systemImage: "arrow.down.circle")
                 }
                 .buttonStyle(.borderedProminent)
+                .disabled(download != nil)
+
+                if let download {
+                    ProgressView(value: Double(download.bytesTransferred), total: Double(max(download.totalBytes, 1)))
+                        .frame(width: 160)
+                }
 
                 Spacer()
 
@@ -1631,6 +1874,12 @@ struct PhotoDetailPreviewSheet: View {
             .padding([.bottom, .horizontal])
         }
         .frame(minWidth: 520, minHeight: 460)
+        .task(id: p2pClient.localFileURL(for: item.id)) {
+            if item.isVideo, let url = p2pClient.localFileURL(for: item.id) {
+                player = AVPlayer(url: url)
+            }
+        }
+        .onDisappear { player?.pause() }
     }
 
     private func formatBytes(_ bytes: Int64) -> String {

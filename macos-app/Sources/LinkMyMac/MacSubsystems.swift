@@ -86,6 +86,28 @@ public final class MacSubsystems: NSObject, UNUserNotificationCenterDelegate {
                 self?.mediaManager?.forceBroadcastCurrentState()
             }
         }
+
+        p2pClient.onFileReceived = { [weak self] url in
+            Task { @MainActor in
+                self?.postFileReceivedBanner(url)
+            }
+        }
+    }
+
+    /// "Received from phone" banner; clicking it reveals the file in Finder.
+    private func postFileReceivedBanner(_ url: URL) {
+        guard Bundle.main.bundleIdentifier != nil else {
+            print("[LinkMyMac] Received from phone: \(url.path)")
+            return
+        }
+        let content = UNMutableNotificationContent()
+        content.title = "Received from \(p2pClient.connectedDeviceName ?? "your phone")"
+        content.body = url.lastPathComponent
+        content.sound = .default
+        content.userInfo = ["fileURL": url.path]
+        UNUserNotificationCenter.current().add(
+            UNNotificationRequest(identifier: "file-\(url.path)", content: content, trigger: nil)
+        )
     }
 
     // =========================================================================
@@ -308,6 +330,12 @@ public final class MacSubsystems: NSObject, UNUserNotificationCenterDelegate {
         withCompletionHandler completionHandler: @escaping () -> Void
     ) {
         let userInfo = response.notification.request.content.userInfo
+        if let path = userInfo["fileURL"] as? String {
+            let url = URL(fileURLWithPath: path)
+            Task { @MainActor in NSWorkspace.shared.activateFileViewerSelecting([url]) }
+            completionHandler()
+            return
+        }
         let notificationKey = userInfo["notificationKey"] as? String ?? ""
         let actionId = userInfo["defaultActionId"] as? String ?? "act_0"
 

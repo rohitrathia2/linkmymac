@@ -13,6 +13,7 @@ import android.graphics.Color
 import android.graphics.Typeface
 import android.graphics.drawable.GradientDrawable
 import android.graphics.drawable.RippleDrawable
+import android.net.Uri
 import android.net.wifi.WifiManager
 import android.os.Build
 import android.os.Bundle
@@ -37,6 +38,7 @@ import com.google.zxing.EncodeHintType
 import com.google.zxing.qrcode.QRCodeWriter
 import com.linkmymac.android.R
 import com.linkmymac.android.crypto.CryptoKeystoreManager
+import com.linkmymac.android.crypto.PairingManager
 import com.linkmymac.android.service.LMMNotificationListener
 import com.linkmymac.android.service.P2PDaemonService
 
@@ -74,6 +76,10 @@ class MainActivity : Activity() {
     private lateinit var cryptoManager: CryptoKeystoreManager
     private lateinit var qrPayloadText: TextView
     private lateinit var qrCodeImageView: ImageView
+    private lateinit var pairingCodeText: TextView
+    private lateinit var pairingStatusText: TextView
+    private var lastShownCode = ""
+    private val pickFilesRequest = 201
 
     // Permission status badge references for dynamic onResume refresh
     private lateinit var notifStatusPill: TextView
@@ -162,6 +168,85 @@ class MainActivity : Activity() {
         qrPayloadText.text = payload
         val qrBitmap = generateQrBitmap(payload, 512)
         qrCodeImageView.setImageBitmap(qrBitmap)
+    }
+
+    private fun formattedPairingCode(): String =
+        PairingManager.pairingCode.let { "${it.take(3)} ${it.drop(3)}" }
+
+    /** Codes are single use, so re-render the code and QR whenever a pairing rotates it. */
+    private fun updatePairingUi() {
+        if (!::pairingCodeText.isInitialized) return
+        val code = PairingManager.pairingCode
+        if (code != lastShownCode) {
+            lastShownCode = code
+            pairingCodeText.text = formattedPairingCode()
+            pairingCodeText.contentDescription = "Pairing code " + code.toList().joinToString(" ")
+            updateQrDisplay()
+        }
+        val paired = PairingManager.pairedMacCount(this)
+        pairingStatusText.text = when (paired) {
+            0 -> "No Mac paired yet"
+            1 -> "1 Mac paired"
+            else -> "$paired Macs paired"
+        }
+    }
+
+    /** Share sheet → Mac. Files are streamed; shared text or links go to the Mac clipboard. */
+    private fun handleShareIntent(intent: Intent) {
+        @Suppress("DEPRECATION")
+        val uris: List<Uri> = if (intent.action == Intent.ACTION_SEND_MULTIPLE) {
+            intent.getParcelableArrayListExtra<Uri>(Intent.EXTRA_STREAM).orEmpty()
+        } else {
+            listOfNotNull(intent.getParcelableExtra(Intent.EXTRA_STREAM))
+        }
+        if (uris.isNotEmpty()) {
+            sendFilesToMac(uris)
+            return
+        }
+        val text = intent.getStringExtra(Intent.EXTRA_TEXT)
+        val clipboard = P2PDaemonService.activeClipboardHelper
+        val message = if (!text.isNullOrBlank() && clipboard != null && P2PDaemonService.isMacConnected) {
+            clipboard.sendCustomTextToMac(text)
+            "Sent to your Mac's clipboard"
+        } else {
+            "No paired Mac connected"
+        }
+        Toast.makeText(this, message, Toast.LENGTH_SHORT).show()
+    }
+
+    private fun sendFilesToMac(uris: List<Uri>) {
+        val message = if (P2PDaemonService.sendFilesToMac(uris)) {
+            if (uris.size == 1) "Sending to your Mac…" else "Sending ${uris.size} files to your Mac…"
+        } else {
+            "No paired Mac connected. Open UniBridge on your Mac first."
+        }
+        Toast.makeText(this, message, Toast.LENGTH_LONG).show()
+    }
+
+    private fun pickFilesForMac() {
+        val pick = Intent(Intent.ACTION_OPEN_DOCUMENT)
+            .addCategory(Intent.CATEGORY_OPENABLE)
+            .setType("*/*")
+            .putExtra(Intent.EXTRA_ALLOW_MULTIPLE, true)
+        @Suppress("DEPRECATION")
+        startActivityForResult(pick, pickFilesRequest)
+    }
+
+    @Deprecated("Framework Activity result API; this app doesn't use AndroidX Activity.")
+    override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
+        @Suppress("DEPRECATION")
+        super.onActivityResult(requestCode, resultCode, data)
+        if (requestCode != pickFilesRequest || resultCode != RESULT_OK || data == null) return
+        val clip = data.clipData
+        val uris = if (clip != null) (0 until clip.itemCount).map { clip.getItemAt(it).uri } else listOfNotNull(data.data)
+        if (uris.isNotEmpty()) sendFilesToMac(uris)
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        if (intent.action == Intent.ACTION_SEND || intent.action == Intent.ACTION_SEND_MULTIPLE) {
+            handleShareIntent(intent)
+        }
     }
 
     private fun getLocalWifiIpAddress(): String {
@@ -410,7 +495,7 @@ class MainActivity : Activity() {
             networkStatusBadge.background = createPillDrawable("#052E16", "#10B981")
             networkStatusBadge.setTextColor(Color.parseColor("#34D399"))
         } else {
-            networkStatusBadge.text = "○ STANDBY (Ready for Mac)"
+            networkStatusBadge.text = "○ STANDBY • Pairing code ${formattedPairingCode()}"
             networkStatusBadge.background = createPillDrawable("#1E293B", "#64748B")
             networkStatusBadge.setTextColor(Color.parseColor("#94A3B8"))
         }
@@ -430,6 +515,7 @@ class MainActivity : Activity() {
     private fun performDynamicAutoRefresh() {
         updateAllPermissionStates()
         updateNetworkState()
+        updatePairingUi()
         tickLiveMediaProgress()
 
         // Dynamic local clipboard change check
@@ -631,6 +717,12 @@ class MainActivity : Activity() {
      */
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        // Opened from another app's share sheet: send, then return to that app.
+        if (intent.action == Intent.ACTION_SEND || intent.action == Intent.ACTION_SEND_MULTIPLE) {
+            handleShareIntent(intent)
+            finish()
+            return
+        }
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         window.statusBarColor = Color.parseColor("#0B0E14")
         window.navigationBarColor = Color.parseColor("#0B0E14")
@@ -1277,7 +1369,20 @@ class MainActivity : Activity() {
         // HOW IT DOES IT: Encodes TLS fingerprint, nonce, IPs via ZXing QRCodeWriter.
         // WHY IT DOES IT: Enables 1-second out-of-band camera pairing with Mac client.
         // =====================================================================
-        val qrSectionHeader = createSectionHeader("INSTANT QR CODE PAIRING")
+        root.addView(createSectionHeader("FILE SHARING"))
+        val filesCard = createCardContainer()
+        filesCard.addView(TextView(this).apply {
+            text = "Send files to your Mac's Downloads folder. Files from your Mac are saved to " +
+                "Download/LinkMyMac. You can also use Share → LinkMyMac Companion in any app."
+            textSize = 12f
+            setTextColor(Color.parseColor("#94A3B8"))
+            setLineSpacing(dp(2f), 1f)
+            setPadding(0, 0, 0, dp(10))
+        })
+        filesCard.addView(createModernButton("Send Files to Mac", "#0284C7", "#FFFFFF") { pickFilesForMac() })
+        root.addView(filesCard)
+
+        val qrSectionHeader = createSectionHeader("PAIR WITH YOUR MAC")
         root.addView(qrSectionHeader)
 
         val qrCard = createCardContainer().apply {
@@ -1285,14 +1390,31 @@ class MainActivity : Activity() {
         }
 
         val qrInstruction = TextView(this).apply {
-            text = "Point Mac Camera at this QR code in UniBridge to connect instantly"
+            text = "Type this code when UniBridge on your Mac asks for it, or scan the QR code with the Mac camera"
             textSize = 13f
             setTextColor(Color.parseColor("#E2E8F0"))
             typeface = Typeface.DEFAULT_BOLD
             gravity = Gravity.CENTER
-            setPadding(0, 0, 0, dp(14))
+            setPadding(0, 0, 0, dp(10))
         }
         qrCard.addView(qrInstruction)
+
+        pairingCodeText = TextView(this).apply {
+            textSize = 30f
+            setTypeface(Typeface.MONOSPACE, Typeface.BOLD)
+            letterSpacing = 0.15f
+            setTextColor(Color.parseColor("#F8FAFC"))
+            gravity = Gravity.CENTER
+        }
+        qrCard.addView(pairingCodeText)
+
+        pairingStatusText = TextView(this).apply {
+            textSize = 12f
+            setTextColor(Color.parseColor("#94A3B8"))
+            gravity = Gravity.CENTER
+            setPadding(0, 0, 0, dp(14))
+        }
+        qrCard.addView(pairingStatusText)
 
         // QR Code Scannable Image
         val qrBorder = LinearLayout(this).apply {
@@ -1332,8 +1454,9 @@ class MainActivity : Activity() {
             textColor = "#F8FAFC"
         ) {
             cryptoManager.rotateEphemeralNonce()
-            updateQrDisplay()
-            Toast.makeText(this@MainActivity, "Pairing token refreshed!", Toast.LENGTH_SHORT).show()
+            PairingManager.rotateCode()
+            updatePairingUi()
+            Toast.makeText(this@MainActivity, "New pairing code generated", Toast.LENGTH_SHORT).show()
         }
         btnRotateToken.layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f).apply {
             marginEnd = dp(8)
@@ -1355,6 +1478,22 @@ class MainActivity : Activity() {
         qrButtonRow.addView(btnCopyToken)
         qrCard.addView(qrButtonRow)
 
+        val btnForgetMacs = createModernButton(
+            text = "Forget Paired Macs",
+            bgColor = "#3F1D1D",
+            textColor = "#FCA5A5"
+        ) {
+            PairingManager.forgetAllMacs(this@MainActivity)
+            P2PDaemonService.disconnectAllClients()
+            updatePairingUi()
+            Toast.makeText(this@MainActivity, "Macs unpaired. They'll need the code to reconnect.", Toast.LENGTH_SHORT).show()
+        }
+        btnForgetMacs.layoutParams = LinearLayout.LayoutParams(
+            LinearLayout.LayoutParams.MATCH_PARENT,
+            LinearLayout.LayoutParams.WRAP_CONTENT
+        ).apply { bottomMargin = dp(12) }
+        qrCard.addView(btnForgetMacs)
+
         // Monospaced Debug Token Dump
         qrPayloadText = TextView(this).apply {
             textSize = 10f
@@ -1373,7 +1512,7 @@ class MainActivity : Activity() {
         setContentView(scroll)
 
         // Initial setup
-        updateQrDisplay()
+        updatePairingUi() // also renders the QR
         updateAllPermissionStates()
     }
 

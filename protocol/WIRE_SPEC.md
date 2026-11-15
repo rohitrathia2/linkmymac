@@ -1,44 +1,67 @@
-# LinkMyMac Wire Protocol & Cryptographic Specification (v1.0)
+# LinkMyMac Wire Protocol (v1.1)
 
-## 1. Transport Layer & Port Binding
-- **Service Type (mDNS / DNS-SD):** `_linkmymac._tcp.local.`
-- **Default TCP Port:** `8765` (Control + Multiplexed Stream), `8766` (Optional dedicated Bulk Binary Stream)
-- **USB ADB Tunnel Fallback:** `adb forward tcp:8765 tcp:8765` (binds to `127.0.0.1:8765`)
+What both apps actually speak today. `linkmymac_protocol.proto` sketches a future binary schema and is not used on the wire.
 
-## 2. Length-Delimited Framing Format
-Every packet sent over the TLS 1.3 socket is prefixed with an 8-byte header:
+## 1. Transport
+- The phone listens on **TCP 8765** and advertises **`_linkmymac._tcp.local.`** over mDNS/DNS-SD.
+- USB: `adb forward tcp:8765 tcp:8765`, then the Mac connects to `127.0.0.1:8765`.
+- Plain TCP. **There is no TLS yet** (see §6).
 
+## 2. Framing
 ```
-+-------------------+-------------------+-----------------------------------+
-| Magic (2 bytes)   | Flags (2 bytes)   | Payload Length (4 bytes, uint32)  |
-| 0x4C 0x4D ("LM")  | 0x0001 (Protobuf) | Big-Endian Length (Max 16 MB)     |
-+-------------------+-------------------+-----------------------------------+
-|                        Payload Bytes (N bytes)                            |
-+---------------------------------------------------------------------------+
+[ 0x4C 0x4D "LM" ][ flags: uint16 BE ][ length: uint32 BE ][ payload: length bytes ]
 ```
+- `flags = 0x0001`: the payload is a UTF-8 JSON object with a `"type"` field. Other flag values are reserved and ignored.
+- `length` is 1 byte to 16 MB. Both sides drop the connection on a bad magic or an oversized length.
 
-- **Magic Bytes:** `0x4C 0x4D` (`"LM"`) validates frame synchronization.
-- **Flags:**
-  - `0x0001`: Standard Protobuf/JSON Control Frame (`LMMFrame`)
-  - `0x0002`: Raw Binary File Chunk Frame
-  - `0x0004`: Compressed Frame (LZ4)
-- **Payload Length:** 32-bit unsigned big-endian integer indicating exact byte length of the following message.
+## 3. Pairing and authentication
+On connect the **phone speaks first**:
+```json
+{"type":"AUTH_CHALLENGE","phoneId":"<uuid>","phoneName":"vivo I1928","nonce":"<32 hex>"}
+```
+Until authentication completes, the phone ignores every frame except `PAIRING_HANDSHAKE`. The Mac ignores everything except `AUTH_CHALLENGE` and `PAIRING_ACK`.
 
-## 3. Out-of-Band QR Pairing & mTLS Handshake
-1. **QR Code Payload (Generated on Android):**
-   ```json
-   {
-     "v": 1,
-     "name": "Galaxy S25 Ultra",
-     "ips": ["192.168.1.45", "192.168.43.1"],
-     "port": 8765,
-     "certFp": "SHA256:9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08",
-     "nonce": "7d8a9b0c1e2f3a4b5c6d7e8f9a0b1c2d"
-   }
-   ```
-2. **TLS Certificate Pinning:**
-   - Both macOS and Android generate a self-signed X.509 certificate backed by hardware keys (`AndroidKeyStore` EC/Ed25519 on Android; `CryptoKit` / Keychain on macOS).
-   - During the TLS 1.3 handshake, the custom `X509TrustManager` (Android) and `sec_protocol_options_set_verify_block` (macOS) verify that the peer's leaf certificate SHA-256 digest matches `certFp` from the QR code (or saved trust store).
-3. **Application-Layer Challenge (`PairingHandshake`):**
-   - Immediately after TLS establishment, macOS sends a `PairingHandshake` frame containing its `device_id`, `device_name`, and an Ed25519 signature over `(device_id || peer_cert_fp || ephemeral_nonce)`.
-   - Android verifies the signature and responds with `PairingAck(accepted = true)`. Both peers persist the peer certificate fingerprint for automatic background reconnection.
+**Mac → phone, already paired** (secret `S` stored for `phoneId`):
+```json
+{"type":"PAIRING_HANDSHAKE","deviceId":"<mac uuid>","deviceName":"…","platform":"macos",
+ "macNonce":"<32 hex>","proof":"hex(HMAC-SHA256(S, \"mac|\" + nonce))"}
+```
+**Mac → phone, first pairing** (code from the phone's screen or its QR):
+```json
+{"type":"PAIRING_HANDSHAKE","deviceId":"…","deviceName":"…","platform":"macos","macNonce":"…",
+ "pairingCode":"ABC123","macPublicKey":"<base64 DER SubjectPublicKeyInfo, ephemeral P-256>"}
+```
+**Phone → Mac:**
+```json
+{"type":"PAIRING_ACK","accepted":true,"deviceName":"…",
+ "proof":"hex(HMAC-SHA256(S, \"phone|\" + macNonce))",
+ "phonePublicKey":"<base64 DER SPKI, first pairing only>"}
+{"type":"PAIRING_ACK","accepted":false,"error":"PAIRING_REQUIRED | INVALID_CODE | RATE_LIMITED"}
+```
+- On first pairing, `S = HMAC-SHA256(ECDH-P256 shared x-coordinate, "linkmymac-pairing-v1")`, derived on both sides. `S` itself never crosses the wire.
+- The Mac only trusts the phone after checking its `proof`. A failed proof from a known phone means the phone forgot this Mac, so the Mac drops `S` and asks for a code.
+- Codes are 6 characters from `A–Z 2–9` without `0 O 1 I L`, and each is single-use. A wrong code blocks all code attempts for 3 s.
+- The phone closes sockets that stay unauthenticated and silent for 30 s, and accepts at most 8 sockets at once.
+- The phone stores `S` per Mac `deviceId` in SharedPreferences ("Forget Paired Macs" clears them). The Mac stores `S` per `phoneId` in UserDefaults.
+
+## 4. File transfer (either direction)
+```
+sender   → FILE_OFFER             {transferId, fileName, mimeType, totalBytes (-1 if unknown)}
+sender   → FILE_CHUNK             {transferId, chunkIndex 0…n, dataBase64 (≤ 64 KB raw)}
+sender   → FILE_TRANSFER_COMPLETE {transferId, totalChunks}
+receiver → FILE_TRANSFER_RESULT   {transferId, ok, error?}
+```
+- Receivers reject out-of-order chunks and a chunk-count mismatch. Partial files are deleted.
+- Senders wait for the socket to take each chunk (backpressure), so any file size streams in constant memory.
+- The phone saves to `Download/LinkMyMac` through MediaStore. The Mac saves to `~/Downloads` and never overwrites (`name (1).ext`). Both sides reduce incoming names to a plain file name.
+- Gallery downloads reuse this: the Mac sends `MEDIA_DOWNLOAD_REQUEST {mediaId, transferId: "media_<id>"}`, and the phone answers with the frames above and the name `media_<id>.<ext>`.
+
+## 5. Other messages (JSON `type`)
+| Direction | Types |
+|:---|:---|
+| Mac → phone | `HEARTBEAT_PING` (every 5 s), `NOTIFICATIONS_SYNC_REQUEST`, `NOTIFICATION_ACTION`, `NOTIFICATION_DISMISS`, `NOTIFICATION_CLEAR_ALL`, `CLIPBOARD_EVENT`, `MEDIA_INDEX_REQUEST`, `MEDIA_DOWNLOAD_REQUEST`, `MEDIA_DELETE_REQUEST`, `CAMERA_CONTROL`, `NOW_PLAYING_UPDATE` |
+| Phone → Mac | `HEARTBEAT_PONG` (battery %), `NOTIFICATION_EVENT`, `CLIPBOARD_EVENT`, `MEDIA_INDEX_RESPONSE` (photos and videos; videos include `durationMs`), `MEDIA_GALLERY_UPDATED`, `MEDIA_DELETE_RESPONSE`, `CAMERA_FRAME`, `CAMERA_STREAM_STATUS`, `MEDIA_CONTROL_COMMAND` |
+
+## 6. Not implemented yet
+- **TLS.** The QR payload already carries the phone's certificate fingerprint (`certFp`) for pinning, but the sockets don't use it. Until then, Wi-Fi traffic is readable by others on the network, and an active attacker could hijack a session. USB traffic stays off the network.
+- **Binary frames** (`flags 0x0002`) and **Protobuf.** Files travel as base64 inside JSON, which costs about 33% in size.
