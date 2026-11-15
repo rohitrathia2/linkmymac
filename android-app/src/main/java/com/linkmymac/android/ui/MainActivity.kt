@@ -584,6 +584,12 @@ class MainActivity : Activity() {
         mediaSubtitleText.text = String.format("%s%02d:%02d / %02d:%02d", sub, curM, curS, totM, totS)
     }
 
+    override fun onWindowFocusChanged(hasFocus: Boolean) {
+        super.onWindowFocusChanged(hasFocus)
+        // Android 10+ only lets the focused app read the clipboard: send what was copied elsewhere.
+        if (hasFocus) P2PDaemonService.activeClipboardHelper?.pushClipboardOnFocus()
+    }
+
     override fun onResume() {
         super.onResume()
         updateAllPermissionStates()

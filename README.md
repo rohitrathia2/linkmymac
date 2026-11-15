@@ -35,7 +35,7 @@ The diagram is generated with [archify](https://github.com/tt-a1i/archify) from 
 | Feature | Status | What it does |
 |:---|:---|:---|
 | **Notification mirroring + quick reply** | ✅ | Phone notifications appear as macOS banners and in the app. Reply inline or dismiss them from the Mac. |
-| **Universal clipboard (text)** | ✅ | Copy on one device, paste on the other. SHA-256 dedup stops copies from echoing back and forth. |
+| **Universal clipboard (text)** | ✅ | Copy on one device, paste on the other. SHA-256 dedup stops copies from echoing back and forth. Android 10+ blocks background clipboard reads, so a copy made on the phone reaches the Mac the next time you open LinkMyMac. Clips marked sensitive (password managers) are never sent. |
 | **Photos & Videos** | ✅ | Separate Photos and Videos sections, each paged and synced on its own. **Group by Folder** mirrors the phone's storage folders (Camera, Screenshots, WhatsApp…), with each folder collapsible. Download, share or delete from the Mac. |
 | **Video streaming** | ✅ | **Play** starts after the first few hundred KB. AVPlayer fetches only the byte ranges it needs, so seeking is instant and nothing waits for a full download. |
 | **File sharing, both ways** | ✅ | Mac → phone from the File Sharing tab, the Dock icon or the menu bar. Phone → Mac from **Share → LinkMyMac Companion** in any app, or **Send Files to Mac**. Any size, streamed in constant memory. |

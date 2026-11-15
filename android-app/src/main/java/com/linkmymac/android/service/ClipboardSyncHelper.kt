@@ -22,6 +22,9 @@ import java.security.MessageDigest
  * WHY IT DOES IT: Enables seamless universal copy-paste between Android and Mac
  *                 while strictly eliminating infinite echo ping-pong loops via
  *                 SHA-256 digest deduplication.
+ * ANDROID 10+: only the focused app may read the clipboard, so the listener misses
+ *              copies made in other apps; MainActivity sends those through
+ *              [pushClipboardOnFocus] when LinkMyMac comes to the front.
  * =============================================================================
  */
 class ClipboardSyncHelper(context: Context) {
@@ -39,6 +42,10 @@ class ClipboardSyncHelper(context: Context) {
     /** Tracks the SHA-256 digest of the last synced content to suppress echo loops */
     @Volatile
     private var lastSyncedHash: String = ""
+
+    /** ClipDescription timestamp of the last clip this helper read; -1 = none yet. */
+    @Volatile
+    private var lastSeenClipStamp = -1L
 
     /**
      * Listener callback invoked by Android OS whenever user copies text on phone.
@@ -91,8 +98,12 @@ class ClipboardSyncHelper(context: Context) {
      * -------------------------------------------------------------------------
      */
     fun pushCurrentClipboardToMac() {
-        val clip = clipboardManager.primaryClip ?: return
+        val clip = clipboardManager.primaryClip ?: return // null when Android denies a background read
+        lastSeenClipStamp = clip.description.timestamp
         if (clip.itemCount == 0) return
+        // Password managers flag secrets (ClipDescription.EXTRA_IS_SENSITIVE, a literal since the
+        // constant is API 33). Never send those to the Mac.
+        if (clip.description.extras?.getBoolean("android.content.extra.IS_SENSITIVE") == true) return
 
         val text = clip.getItemAt(0).text?.toString() ?: return
         if (text.isEmpty()) return
@@ -114,6 +125,17 @@ class ClipboardSyncHelper(context: Context) {
             if (clipboardHistory.size > 20) clipboardHistory.removeAt(clipboardHistory.size - 1)
         }
         onClipUpdated?.invoke(text)
+    }
+
+    /**
+     * Sends whatever was copied in another app while LinkMyMac was in the background.
+     * Call when the activity gains window focus: that's the only time Android 10+ allows the read.
+     * Reading the description doesn't count as reading the clip, so an unchanged timestamp skips
+     * the read and Android 12's "pasted from your clipboard" toast.
+     */
+    fun pushClipboardOnFocus() {
+        val stamp = clipboardManager.primaryClipDescription?.timestamp ?: return
+        if (stamp != lastSeenClipStamp) pushCurrentClipboardToMac()
     }
 
     /**
