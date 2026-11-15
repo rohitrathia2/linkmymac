@@ -133,9 +133,19 @@ class P2PDaemonService : Service() {
             }
         }
 
-        /** Blocking send to the first paired Mac: lets the screen encoder run at the link's pace. */
-        fun sendToMacBlocking(json: JSONObject): Boolean =
-            activeClients.firstOrNull { it.authenticated }?.sendNow(json) ?: false
+        /** The Mac that asked for screen mirroring; frames go only to it. */
+        @Volatile
+        private var mirrorViewer: ClientSession? = null
+
+        /**
+         * Blocking send of a screen frame to the Mac that asked for mirroring (paces the encoder
+         * to the link). False once that Mac is gone, which stops mirroring: the screen never
+         * falls through to another paired Mac.
+         */
+        fun sendToMacBlocking(json: JSONObject): Boolean {
+            val viewer = mirrorViewer?.takeIf { it.authenticated && it in activeClients } ?: return false
+            return viewer.sendNow(json)
+        }
 
         /** After the person grants SMS / phone permissions in the app. */
         fun onPermissionsChanged() {
@@ -542,7 +552,10 @@ class P2PDaemonService : Service() {
                 "CALL_LOG_REQUEST" -> ioExecutor.execute { startPhoneBridges(); sendJson(callBridge.recent(json.optInt("limit", 100))) }
 
                 // Screen mirroring + mouse/keyboard control
-                "MIRROR_START" -> requestMirroring()
+                "MIRROR_START" -> {
+                    mirrorViewer = this
+                    requestMirroring()
+                }
                 "MIRROR_STOP" -> ScreenMirrorService.stop(this@P2PDaemonService)
                 "INPUT_TAP", "INPUT_SWIPE", "INPUT_TEXT", "INPUT_KEY", "INPUT_GLOBAL" -> {
                     val control = ControlService.instance
@@ -958,10 +971,15 @@ class P2PDaemonService : Service() {
     // Phone features: SMS, calls, mirroring prompt, hotspot prompt
     // =========================================================================
 
-    /** Starts the SMS observer and call listener; each is a no-op until its permission is granted. */
+    /**
+     * Starts the SMS observer and call listener; each is a no-op until its permission is granted.
+     * Callers include socket threads, so hop to the main thread: one place, no double registration.
+     */
     fun startPhoneBridges() {
-        smsBridge.startObserving { broadcastControlFrame(JSONObject().put("type", "SMS_UPDATED")) }
-        callBridge.start { broadcastControlFrame(it) }
+        mainHandler.post {
+            smsBridge.startObserving { broadcastControlFrame(JSONObject().put("type", "SMS_UPDATED")) }
+            callBridge.start { broadcastControlFrame(it) }
+        }
     }
 
     /**

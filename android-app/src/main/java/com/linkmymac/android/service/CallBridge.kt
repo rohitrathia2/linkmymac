@@ -31,7 +31,8 @@ class CallBridge(private val context: Context, private val names: (String) -> St
     fun start(onState: (JSONObject) -> Unit) {
         if (listener != null || !granted(Manifest.permission.READ_PHONE_STATE)) return
         val telephony = context.getSystemService(TelephonyManager::class.java) ?: return
-        listener = object : PhoneStateListener() {
+        // The no-arg constructor needs a Looper on the calling thread; an executor works from any thread.
+        listener = object : PhoneStateListener(context.mainExecutor) {
             override fun onCallStateChanged(state: Int, phoneNumber: String?) {
                 val number = phoneNumber.orEmpty() // empty without READ_CALL_LOG
                 onState(JSONObject()
