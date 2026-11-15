@@ -13,7 +13,7 @@ import UniformTypeIdentifiers
  * LinkMyMacApp: Native macOS Client Application Entry Point
  * -----------------------------------------------------------------------------
  * WHAT IT DOES:
- *   Acts as the SwiftUI `@main` lifecycle orchestrator for UniBridge on macOS.
+ *   Acts as the SwiftUI `@main` lifecycle orchestrator for LinkMyMac on macOS.
  *   Instantiates the shared P2P communication client (`MacP2PClient`), hosts
  *   the primary dashboard window (`DashboardView`), and manages a persistent
  *   system tray menu (`MenuBarExtra`).
@@ -1534,7 +1534,7 @@ struct QRCameraScannerSheet: View {
             }
             .padding([.top, .horizontal])
 
-            Text("Hold your Android phone's UniBridge QR code in front of your Mac's camera.")
+            Text("Hold your Android phone's LinkMyMac QR code in front of your Mac's camera.")
                 .font(.subheadline)
                 .foregroundColor(.secondary)
                 .multilineTextAlignment(.center)
@@ -1713,7 +1713,7 @@ final class FloatingCameraManager {
             backing: .buffered,
             defer: false
         )
-        p.title = "UniBridge Camera • PiP"
+        p.title = "LinkMyMac Camera"
         p.level = .floating
         p.isFloatingPanel = true
         p.isMovableByWindowBackground = true
@@ -1834,7 +1834,7 @@ struct FaceTimeIntegrationGuideSheet: View {
                             Text("1. Always-on-Top Floating Camera (Recommended)")
                                 .font(.headline)
                         }
-                        Text("Click the **Picture-in-Picture** button in UniBridge to detach a floating webcam window that stays pinned on top of your FaceTime call, Zoom, or Google Meet. You can move it next to your call window and flip Front/Back lenses anytime.")
+                        Text("Click **Open floating window** in LinkMyMac's Camera tab to detach a floating webcam window that stays pinned on top of your FaceTime call, Zoom, or Google Meet. You can move it next to your call window and flip Front/Back lenses anytime.")
                             .font(.caption)
                             .foregroundColor(.secondary)
 
@@ -1859,7 +1859,7 @@ struct FaceTimeIntegrationGuideSheet: View {
                             Text("2. Share Camera View in FaceTime Call")
                                 .font(.headline)
                         }
-                        Text("While on a FaceTime call on your Mac, click the **Share Screen** button in FaceTime's toolbar, choose **Window**, and select this UniBridge FaceTime Camera window. All call participants will see your high-resolution phone camera stream in real time.")
+                        Text("While on a FaceTime call on your Mac, click the **Share Screen** button in FaceTime's toolbar, choose **Window**, and select the **LinkMyMac Camera** window. All call participants will see your high-resolution phone camera stream in real time.")
                             .font(.caption)
                             .foregroundColor(.secondary)
                     }
@@ -1940,7 +1940,7 @@ struct FaceTimeIntegrationGuideSheet: View {
                         .background(Color(NSColor.controlBackgroundColor))
                         .cornerRadius(8)
 
-                        Text("💡 **Instant Lens Flip (Front ⇄ Back)**: While in any video call, toggle between Selfie and 4K Main lenses without hanging up! Tap **`🔄 Switch Lens`** on your Android screen or click **Flip Lens** in UniBridge on Mac.")
+                        Text("💡 **Instant Lens Flip (Front ⇄ Back)**: While in any video call, toggle between Selfie and 4K Main lenses without hanging up! Tap **`🔄 Switch Lens`** on your Android screen or click the flip-camera button in LinkMyMac on your Mac.")
                             .font(.caption)
                             .foregroundColor(.cyan)
                     }

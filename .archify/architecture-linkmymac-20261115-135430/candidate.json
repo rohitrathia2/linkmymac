@@ -17,7 +17,7 @@
     {
       "id": "mac_ui",
       "type": "frontend",
-      "label": "UniBridge app",
+      "label": "LinkMyMac app",
       "sublabel": "SwiftUI · menu bar",
       "pos": [
         40,

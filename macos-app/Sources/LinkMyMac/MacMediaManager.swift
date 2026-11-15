@@ -36,7 +36,7 @@ import AppKit
  * WHY IT DOES IT:
  *   Delivers the seamless Apple Continuity / Now Playing experience to Android,
  *   allowing users to view and control macOS audio/video directly from their phone's
- *   lock screen, notification panel, and the UniBridge companion application.
+ *   lock screen, notification panel, and the LinkMyMac companion application.
  * =============================================================================
  */
 @MainActor

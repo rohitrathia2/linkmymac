@@ -9,7 +9,7 @@ It's two apps that talk to each other:
 | App | Folder | Built with |
 |:---|:---|:---|
 | **LinkMyMac Companion** (Android 10+) | `android-app/` | Kotlin, a foreground service, `NotificationListenerService`, MediaStore, camera2 |
-| **UniBridge** (macOS 14+) | `macos-app/` | Swift 6, SwiftUI + AppKit, Network.framework, CryptoKit, AVKit |
+| **LinkMyMac** (macOS 14+) | `macos-app/` | Swift 6, SwiftUI + AppKit, Network.framework, CryptoKit, AVKit |
 
 [**Download the Android app (latest release)**](https://github.com/rohitrathia2/linkmymac/releases/latest) · [Wire protocol](protocol/WIRE_SPEC.md)
 
@@ -88,17 +88,17 @@ Because the app is ad-hoc signed, macOS may ask again for Local Network, Downloa
 
 ## Getting started
 1. Start the phone app. For USB, also run `adb forward tcp:8765 tcp:8765`.
-2. Start UniBridge on the Mac. It finds the phone over Wi-Fi or USB.
-3. The Mac sidebar asks for a **pairing code**. Type the code shown in the phone app's status badge, or scan its QR code from the Mac's **QR Code Pairing** tab.
-4. Done. Notifications, clipboard and the gallery start syncing. Send files from the **File Sharing** tab, and browse **Photos** or **Videos** (try **Group by Folder**).
-5. For **Messages**, **Calls** and **Phone Screen**, open the phone app's **Messages, Calls & Mac Control** card:
-   - Tap **Allow Messages & Calls**.
-   - Tap **Turn On Mac Control**, then enable "LinkMyMac Mac Control".
+2. Start LinkMyMac on the Mac. It finds the phone over Wi-Fi or USB.
+3. The Mac asks for a **pairing code**. Type the 6-character code shown in the phone app, or click **Scan its QR code**.
+4. Done. Notifications, clipboard and the gallery start syncing. Send files from the **Files** tab, and browse **Photos** or **Videos** (try **By folder**).
+5. For **Messages**, **Calls** and **Phone Screen**, turn on these switches under **Shared with your Mac** in the phone app:
+   - **Messages & calls**, then allow the permissions it asks for.
+   - **Mac Control**, then enable "LinkMyMac Mac Control" in Accessibility settings.
 
 ## Use the phone camera in video calls
 The phone camera doesn't register as a system webcam yet, so call apps can't list it directly. Use OBS as a bridge:
-1. Install OBS Studio. In UniBridge, open **FaceTime Camera**, start the phone camera, and open the floating camera window.
-2. In OBS, add **macOS Screen Capture → Window → the UniBridge camera window**, then click **Start Virtual Camera**. The first time, allow it under System Settings → General → Login Items & Extensions → Camera Extensions.
+1. Install OBS Studio. In LinkMyMac, open **Camera**, click **Start camera**, then **Open floating window**.
+2. In OBS, add **macOS Screen Capture → Window → the LinkMyMac Camera window**, then click **Start Virtual Camera**. The first time, allow it under System Settings → General → Login Items & Extensions → Camera Extensions.
 3. In the call, choose **OBS Virtual Camera** for the phone or **FaceTime HD Camera** for the Mac:
    - FaceTime: Video → Camera
    - Zoom: the ^ next to Stop Video
