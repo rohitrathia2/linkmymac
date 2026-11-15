@@ -65,7 +65,7 @@ The first time a Mac connects, the phone shows a 6-character code in its top sta
 |:---|:---|:---|
 | Notification mirroring + quick reply | ✅ | `NotificationListenerService` + `RemoteInput` → `UNUserNotificationCenter` |
 | Clipboard sync (text) | ✅ | `ClipboardManager` ⇄ `NSPasteboard`, SHA-256 dedup |
-| Photos & videos: browse, download, share, delete | ✅ | MediaStore images + videos → Photos & Videos tab; videos play in AVKit after download |
+| Photos and videos: browse, download, share, delete | ✅ | Separate Photos and Videos sections, each paged and synced on its own; videos play in AVKit after download |
 | File sharing, both directions | ✅ | Mac: File Sharing tab (drop zone), Dock icon, menu bar. Android: Share → LinkMyMac Companion, or "Send Files to Mac" |
 | Phone camera on the Mac | ✅ in-app only | camera2 JPEG frames shown in the app; it is not a system webcam (no CMIO extension) |
 | Mac "Now Playing" controls on the phone | ✅ | Media notification on Android |
@@ -104,4 +104,4 @@ It plays the Mac's role against the real phone and checks:
 - photo and video streaming
 - a Mac → phone file transfer
 
-It leaves a test "Mac" paired on the phone; use "Forget Paired Macs" to remove it.
+It unpairs its throwaway test client at the end, so your real pairing is left alone.

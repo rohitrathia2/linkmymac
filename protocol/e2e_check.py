@@ -6,7 +6,7 @@ Plays the Mac's role against a real phone:
     adb forward tcp:8765 tcp:8765
     python3 protocol/e2e_check.py --code ABC123      # code shown in the Android app
 
-Leaves one test "Mac" paired on the phone (use "Forget Paired Macs" to remove it).
+Pairs a throwaway test client and UNPAIRs it at the end, so real pairings are untouched.
 Standard library only; the P-256 math below is test-grade (not constant time).
 """
 import argparse, base64, hashlib, hmac, json, os, secrets, socket, struct, sys, time, uuid
@@ -130,11 +130,18 @@ def main():
     pong = recv_type(sock, "HEARTBEAT_PONG")
     check("paired client gets data", pong.get("clientTimeMs") == 42)
 
-    # Gallery lists photos and videos; the smallest video streams intact (with backpressure).
-    send(sock, {"type": "MEDIA_INDEX_REQUEST", "offset": 0, "limit": 1000, "includeThumbnails": False})
-    items = recv_type(sock, "MEDIA_INDEX_RESPONSE", timeout=30)["items"]
-    videos = [i for i in items if i.get("mimeType", "").startswith("video/")]
-    print(f"      gallery page: {len(items) - len(videos)} photos, {len(videos)} videos")
+    # Photos and videos page separately (the Mac shows them in separate sections).
+    pages = {}
+    for kind, prefix in (("image", "image/"), ("video", "video/")):
+        send(sock, {"type": "MEDIA_INDEX_REQUEST", "mediaType": kind, "offset": 0, "limit": 200,
+                    "includeThumbnails": False})
+        resp = recv_type(sock, "MEDIA_INDEX_RESPONSE", timeout=30)
+        pages[kind] = resp["items"]
+        check(f"{kind} page holds only {kind}s", resp.get("mediaType") == kind and
+              all(i.get("mimeType", "").startswith(prefix) for i in resp["items"]), str(resp.get("mediaType")))
+        print(f"      {kind}s: {len(resp['items'])} loaded of {resp.get('totalCount')}")
+    videos = pages["video"]
+    # The smallest video streams intact (with backpressure).
     if videos:
         video = min(videos, key=lambda v: int(v["sizeBytes"]))
         check("videos carry a duration", int(video.get("durationMs", 0)) > 0, str(video))
@@ -189,6 +196,24 @@ def main():
     send(sock, handshake(device_id, "n3", proof=proof(secret, "mac", old_nonce)))
     ack = recv_type(sock, "PAIRING_ACK")
     check("replayed proof rejected", ack.get("accepted") is False, str(ack))
+    sock.close()
+
+    # 7. Clean up: UNPAIR removes only this test client; the phone then closes the session.
+    sock, ch = connect(args.host, args.port)
+    send(sock, handshake(device_id, "n4", proof=proof(secret, "mac", ch["nonce"])))
+    recv_type(sock, "PAIRING_ACK")
+    send(sock, {"type": "UNPAIR"})
+    sock.settimeout(5)
+    try:
+        while sock.recv(65536):  # drain until the phone hangs up
+            pass
+    except socket.timeout:
+        pass
+    sock.close()
+    sock, ch = connect(args.host, args.port)
+    send(sock, handshake(device_id, "n5", proof=proof(secret, "mac", ch["nonce"])))
+    ack = recv_type(sock, "PAIRING_ACK")
+    check("UNPAIR removed the test client", ack.get("accepted") is False, str(ack))
     sock.close()
 
     print(f"\n{'ALL CHECKS PASSED' if failures == 0 else f'{failures} CHECK(S) FAILED'}")

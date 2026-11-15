@@ -126,7 +126,8 @@ struct LinkMyMacApp: App {
  */
 enum DashboardTab: String, CaseIterable, Identifiable {
     case notifications = "Notifications"
-    case photos = "Photos & Videos"
+    case photos = "Photos"
+    case videos = "Videos"
     case files = "File Sharing"
     case camera = "FaceTime Camera"
     case clipboard = "Universal Clipboard"
@@ -138,6 +139,7 @@ enum DashboardTab: String, CaseIterable, Identifiable {
         switch self {
         case .notifications: return "bell.badge.fill"
         case .photos: return "photo.on.rectangle.angled"
+        case .videos: return "film.stack"
         case .files: return "arrow.up.arrow.down.circle.fill"
         case .camera: return "video.fill"
         case .clipboard: return "doc.on.clipboard.fill"
@@ -202,6 +204,7 @@ struct DashboardView: View {
             detailContent
                 .background(Color(NSColor.windowBackgroundColor))
         }
+        .onChange(of: selectedTab) { photoSearchText = "" } // each section starts unfiltered
         .sheet(isPresented: $isShowingQRScanner) {
             QRCameraScannerSheet(p2pClient: p2pClient, isPresented: $isShowingQRScanner)
         }
@@ -385,8 +388,8 @@ struct DashboardView: View {
                                     .padding(.vertical, 2)
                                     .background(Capsule().fill(Color.red))
                             }
-                        case .photos:
-                            if let total = p2pClient.totalMediaCount {
+                        case .photos, .videos:
+                            if let total = p2pClient.mediaTotals[tab == .videos ? .videos : .photos] {
                                 Text("\(total)")
                                     .font(.caption2)
                                     .foregroundColor(.secondary)
@@ -475,7 +478,9 @@ struct DashboardView: View {
         case .notifications:
             notificationsDetailView
         case .photos:
-            photosDetailView
+            mediaGalleryView(.photos)
+        case .videos:
+            mediaGalleryView(.videos)
         case .files:
             filesDetailView
         case .camera:
@@ -703,16 +708,21 @@ struct DashboardView: View {
     }
 
     // =========================================================================
-    // Scope 2: Photos & AirDrop Gallery Detail View
+    // Scope 2: Photos and Videos (one sidebar section each, paged separately)
     // =========================================================================
-    private var photosDetailView: some View {
-        VStack(spacing: 0) {
+    private func mediaGalleryView(_ kind: MediaKind) -> some View {
+        let isVideos = kind == .videos
+        let items = filteredMediaItems(kind)
+        let loaded = p2pClient.mediaItems(kind).count
+        let total = p2pClient.mediaTotals[kind]
+        let syncTitle = isVideos ? "Sync All Videos" : "Sync All Photos"
+        return VStack(spacing: 0) {
             // Header Bar
             HStack(spacing: 12) {
                 VStack(alignment: .leading, spacing: 2) {
-                    Text("Android Camera Roll")
+                    Text(isVideos ? "Videos" : "Photos")
                         .font(.title2.bold())
-                    Text("\(p2pClient.mediaItems.count) loaded\(p2pClient.totalMediaCount.map { " of \($0) total" } ?? "") • AirDrop & Local Drop")
+                    Text("\(loaded) loaded\(total.map { " of \($0) on the phone" } ?? "")")
                         .font(.caption)
                         .foregroundColor(.secondary)
                 }
@@ -724,7 +734,7 @@ struct DashboardView: View {
                     Image(systemName: "magnifyingglass")
                         .font(.caption)
                         .foregroundColor(.secondary)
-                    TextField("Search photos & videos...", text: $photoSearchText)
+                    TextField(isVideos ? "Search videos..." : "Search photos...", text: $photoSearchText)
                         .textFieldStyle(.plain)
                         .font(.caption)
                         .frame(width: 140)
@@ -734,10 +744,10 @@ struct DashboardView: View {
                 .background(Color.secondary.opacity(0.1))
                 .cornerRadius(8)
 
-                if p2pClient.isSyncingAllMedia {
+                if p2pClient.syncingKind == kind {
                     HStack(spacing: 6) {
                         ProgressView().controlSize(.small)
-                        Text("Syncing (\(p2pClient.mediaItems.count)\(p2pClient.totalMediaCount.map { "/\($0)" } ?? ""))...")
+                        Text("Syncing (\(loaded)\(total.map { "/\($0)" } ?? ""))...")
                             .font(.caption2.bold())
                     }
                     .padding(.horizontal, 10)
@@ -746,15 +756,16 @@ struct DashboardView: View {
                     .cornerRadius(8)
                 } else {
                     Button {
-                        p2pClient.syncAllGallery()
+                        p2pClient.syncAllGallery(kind)
                     } label: {
-                        Label("Sync All Gallery", systemImage: "arrow.triangle.2.circlepath")
+                        Label(syncTitle, systemImage: "arrow.triangle.2.circlepath")
                     }
                     .buttonStyle(.borderedProminent)
+                    .disabled(p2pClient.syncingKind != nil) // one sync at a time
                 }
 
                 Button {
-                    p2pClient.requestMediaIndex(offset: 0, limit: 50)
+                    p2pClient.requestMediaIndex(kind, offset: 0, limit: 50)
                 } label: {
                     Label("Refresh", systemImage: "arrow.clockwise")
                 }
@@ -766,31 +777,32 @@ struct DashboardView: View {
 
             Divider()
 
-            if filteredMediaItems.isEmpty {
+            if items.isEmpty {
                 VStack(spacing: 14) {
                     Spacer()
-                    Image(systemName: "photo.on.rectangle.angled")
+                    Image(systemName: isVideos ? "film.stack" : "photo.on.rectangle.angled")
                         .font(.system(size: 48))
                         .foregroundColor(.secondary.opacity(0.6))
-                    Text("No Photos or Videos Found")
+                    Text(isVideos ? "No Videos Found" : "No Photos Found")
                         .font(.title3.bold())
-                    Text("Click 'Sync All Gallery' above to index all photos and videos from your Android device.")
+                    Text("Click '\(syncTitle)' above to index them from your Android device.")
                         .font(.caption)
                         .foregroundColor(.secondary)
                         .multilineTextAlignment(.center)
                         .frame(maxWidth: 320)
 
-                    Button("Sync Gallery Now") {
-                        p2pClient.syncAllGallery()
+                    Button("Sync Now") {
+                        p2pClient.syncAllGallery(kind)
                     }
                     .buttonStyle(.borderedProminent)
+                    .disabled(p2pClient.syncingKind != nil)
                     Spacer()
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else {
                 ScrollView {
                     LazyVGrid(columns: [GridItem(.adaptive(minimum: 170, maximum: 220), spacing: 14)], spacing: 14) {
-                        ForEach(filteredMediaItems) { item in
+                        ForEach(items) { item in
                             mediaCard(item)
                         }
                     }
@@ -800,13 +812,11 @@ struct DashboardView: View {
         }
     }
 
-    private var filteredMediaItems: [RemoteMediaItem] {
-        if photoSearchText.isEmpty {
-            return p2pClient.mediaItems
-        } else {
-            let q = photoSearchText.lowercased()
-            return p2pClient.mediaItems.filter { $0.displayName.lowercased().contains(q) }
-        }
+    private func filteredMediaItems(_ kind: MediaKind) -> [RemoteMediaItem] {
+        let items = p2pClient.mediaItems(kind)
+        guard !photoSearchText.isEmpty else { return items }
+        let query = photoSearchText.lowercased()
+        return items.filter { $0.displayName.lowercased().contains(query) }
     }
 
     private func mediaCard(_ item: RemoteMediaItem) -> some View {
@@ -1696,6 +1706,7 @@ struct DashboardView: View {
         switch tab {
         case .notifications: return .red
         case .photos: return .blue
+        case .videos: return .indigo
         case .files: return .teal
         case .camera: return .green
         case .clipboard: return .purple

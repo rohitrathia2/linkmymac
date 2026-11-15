@@ -65,6 +65,10 @@ object PairingManager {
     fun pairedMacCount(context: Context): Int =
         prefs(context).all.keys.count { it.startsWith(MAC_PREFIX) }
 
+    fun forgetMac(context: Context, deviceId: String) {
+        prefs(context).edit().remove(MAC_PREFIX + deviceId).commit()
+    }
+
     fun forgetAllMacs(context: Context) {
         val prefs = prefs(context)
         val editor = prefs.edit()

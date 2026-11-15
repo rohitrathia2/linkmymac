@@ -93,6 +93,13 @@ public struct RemoteMediaItem: Identifiable, Sendable {
     public var isVideo: Bool { mimeType.hasPrefix("video/") }
 }
 
+/// Photos and videos are indexed, counted and synced separately (one sidebar section each).
+/// Raw values are the phone's `mediaType` filter.
+public enum MediaKind: String, Sendable, CaseIterable {
+    case photos = "image"
+    case videos = "video"
+}
+
 /**
  * -----------------------------------------------------------------------------
  * FileTransfer: One row in the File Sharing list (either direction)
@@ -152,8 +159,8 @@ public final class MacP2PClient: ObservableObject {
     @Published public private(set) var remoteBatteryPercent: Int? = nil
     @Published public private(set) var notifications: [MirroredNotification] = []
     @Published public private(set) var mediaItems: [RemoteMediaItem] = []
-    @Published public private(set) var totalMediaCount: Int? = nil
-    @Published public private(set) var isSyncingAllMedia: Bool = false
+    @Published public private(set) var mediaTotals: [MediaKind: Int] = [:]
+    @Published public private(set) var syncingKind: MediaKind? = nil
     @Published public private(set) var downloadedMediaFiles: [String: URL] = [:]
 
     // Live Continuity Camera & Lens Controls
@@ -447,6 +454,7 @@ public final class MacP2PClient: ObservableObject {
         awaitingAck = false
         challenge = nil
         pairingKey = nil
+        syncingKind = nil // otherwise the Sync spinner would spin forever after a drop
         failUnfinishedTransfers(reason: "Connection lost")
         connectedDeviceName = nil
         connectionState = "Disconnected"
@@ -859,8 +867,9 @@ public final class MacP2PClient: ObservableObject {
      *   Feeds the SwiftUI photo gallery grid with lightweight thumbnails.
      */
     private func handleMediaIndexResponse(_ json: [String: Any]) {
-        if let total = json["totalCount"] as? Int {
-            self.totalMediaCount = total
+        let kind = (json["mediaType"] as? String).flatMap(MediaKind.init(rawValue:))
+        if let kind, let total = json["totalCount"] as? Int {
+            mediaTotals[kind] = total
         }
 
         guard let items = json["items"] as? [[String: Any]] else { return }
@@ -901,12 +910,19 @@ public final class MacP2PClient: ObservableObject {
             (Int64($0.id) ?? 0) > (Int64($1.id) ?? 0)
         }
 
-        // Automatic batch pagination when Sync All Gallery is running
-        if isSyncingAllMedia, let total = totalMediaCount, self.mediaItems.count < total, !parsed.isEmpty {
-            requestMediaIndex(offset: self.mediaItems.count, limit: 100)
-        } else {
-            self.isSyncingAllMedia = false
+        // "Sync All" keeps paging through one kind until it's fully indexed.
+        if let kind, kind == syncingKind, let total = mediaTotals[kind] {
+            let loaded = mediaItems(kind).count
+            if loaded < total, !parsed.isEmpty {
+                requestMediaIndex(kind, offset: loaded, limit: 100)
+            } else {
+                syncingKind = nil
+            }
         }
+    }
+
+    public func mediaItems(_ kind: MediaKind) -> [RemoteMediaItem] {
+        mediaItems.filter { $0.isVideo == (kind == .videos) }
     }
 
     // =========================================================================
@@ -1104,13 +1120,20 @@ public final class MacP2PClient: ObservableObject {
     }
 
     /**
-     * WHAT IT DOES: Requests a batch of camera roll thumbnails from Android.
-     * HOW IT DOES IT: Emits `MEDIA_INDEX_REQUEST` with offset and limit parameters.
-     * WHY IT DOES IT: Allows paginated photo gallery loading on demand.
+     * WHAT IT DOES: Requests one page of photos or videos (with thumbnails) from Android.
+     * HOW IT DOES IT: Emits `MEDIA_INDEX_REQUEST` with `mediaType`, offset and limit.
+     *                 With no kind it asks for the first page of each.
+     * WHY IT DOES IT: Photos and videos page independently, so the Videos section
+     *                 isn't empty just because the newest 1,000 items are photos.
      */
-    public func requestMediaIndex(offset: Int = 0, limit: Int = 50) {
+    public func requestMediaIndex(_ kind: MediaKind? = nil, offset: Int = 0, limit: Int = 50) {
+        guard let kind else {
+            MediaKind.allCases.forEach { requestMediaIndex($0, offset: offset, limit: limit) }
+            return
+        }
         sendControlJSON([
             "type": "MEDIA_INDEX_REQUEST",
+            "mediaType": kind.rawValue,
             "offset": offset,
             "limit": limit,
             "includeThumbnails": true
@@ -1118,13 +1141,13 @@ public final class MacP2PClient: ObservableObject {
     }
 
     /**
-     * WHAT IT DOES: Starts continuous batch pagination to sync the entire phone gallery.
-     * HOW IT DOES IT: Sets isSyncingAllMedia = true and initiates requestMediaIndex from offset 0.
-     * WHY IT DOES IT: Fulfills user request to sync all photos from Android seamlessly.
+     * WHAT IT DOES: Pages through every photo (or every video) on the phone.
+     * HOW IT DOES IT: Sets `syncingKind` and requests offset 0; handleMediaIndexResponse
+     *                 requests the next page until the kind's total is reached.
      */
-    public func syncAllGallery() {
-        isSyncingAllMedia = true
-        requestMediaIndex(offset: 0, limit: 100)
+    public func syncAllGallery(_ kind: MediaKind) {
+        syncingKind = kind
+        requestMediaIndex(kind, offset: 0, limit: 100)
     }
 
     /**

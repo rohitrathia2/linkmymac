@@ -77,7 +77,13 @@ class MediaStoreProvider(private val context: Context) {
      *                 without exhausting phone memory or stalling the network socket.
      * -------------------------------------------------------------------------
      */
-    fun queryMediaIndex(offset: Int, limit: Int, includeThumbnails: Boolean): JSONObject {
+    /** [mediaType] "image" or "video" pages one kind (the Mac shows them in separate sections); "" pages both. */
+    fun queryMediaIndex(offset: Int, limit: Int, includeThumbnails: Boolean, mediaType: String = ""): JSONObject {
+        val selection = when (mediaType) {
+            "image" -> "${MediaStore.Files.FileColumns.MEDIA_TYPE} = ${MediaStore.Files.FileColumns.MEDIA_TYPE_IMAGE}"
+            "video" -> "${MediaStore.Files.FileColumns.MEDIA_TYPE} = ${MediaStore.Files.FileColumns.MEDIA_TYPE_VIDEO}"
+            else -> MEDIA_SELECTION
+        }
         val itemsArray = JSONArray()
         val projection = arrayOf(
             MediaStore.Files.FileColumns._ID,
@@ -98,7 +104,7 @@ class MediaStoreProvider(private val context: Context) {
             context.contentResolver.query(
                 FILES_URI,
                 projection,
-                MEDIA_SELECTION,
+                selection,
                 null,
                 sortOrder
             )?.use { cursor ->
@@ -160,6 +166,7 @@ class MediaStoreProvider(private val context: Context) {
 
         return JSONObject().apply {
             put("type", "MEDIA_INDEX_RESPONSE")
+            put("mediaType", mediaType)
             put("offset", offset)
             put("totalCount", totalCount)
             put("items", itemsArray)

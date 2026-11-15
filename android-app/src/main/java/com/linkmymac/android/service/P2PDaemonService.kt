@@ -404,6 +404,7 @@ class P2PDaemonService : Service() {
         var authenticated = false
             private set
         private val nonce = PairingManager.newNonce()
+        private var macDeviceId = ""
 
         /** Files being received from the Mac. Touched only by this session's read thread. */
         private val incomingFiles = HashMap<String, IncomingFile>()
@@ -488,6 +489,12 @@ class P2PDaemonService : Service() {
             }
 
             when (frameType) {
+                // A paired Mac removes only itself (vs. "Forget Paired Macs", which drops all)
+                "UNPAIR" -> {
+                    PairingManager.forgetMac(this@P2PDaemonService, macDeviceId)
+                    close()
+                }
+
                 // Mac → phone file sharing (saved to Download/LinkMyMac)
                 "FILE_OFFER" -> beginIncoming(json)
                 "FILE_CHUNK" -> appendIncoming(json)
@@ -557,7 +564,7 @@ class P2PDaemonService : Service() {
                     val offset = json.optInt("offset", 0)
                     val limit = json.optInt("limit", 30)
                     val includeThumbs = json.optBoolean("includeThumbnails", true)
-                    val response = mediaProvider.queryMediaIndex(offset, limit, includeThumbs)
+                    val response = mediaProvider.queryMediaIndex(offset, limit, includeThumbs, json.optString("mediaType"))
                     sendFrame(FLAG_JSON_FRAME, response.toString().toByteArray(Charsets.UTF_8))
                 }
 
@@ -698,6 +705,7 @@ class P2PDaemonService : Service() {
             }
             sendJson(ack) // queued before any broadcast can reach this session
             authenticated = true
+            macDeviceId = json.optString("deviceId")
             socket.soTimeout = 0
             Log.i(TAG, "Mac \"${json.optString("deviceName")}\" authenticated")
             onClientCountChanged?.invoke(connectedClientCount)
