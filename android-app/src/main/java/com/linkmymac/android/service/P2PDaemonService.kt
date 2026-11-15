@@ -89,6 +89,10 @@ class P2PDaemonService : Service() {
         var instance: P2PDaemonService? = null
             private set
 
+        /** Name of the most recently authenticated Mac, for "Connected to …" in the app. */
+        @Volatile
+        var connectedMacName: String? = null
+
         val activeCameraProvider: CameraStreamProvider?
             get() = instance?.cameraProvider
 
@@ -819,6 +823,7 @@ class P2PDaemonService : Service() {
             macDeviceId = json.optString("deviceId")
             socket.soTimeout = 0
             Log.i(TAG, "Mac \"${json.optString("deviceName")}\" authenticated")
+            connectedMacName = json.optString("deviceName").ifBlank { null }
             onClientCountChanged?.invoke(connectedClientCount)
             LMMNotificationListener.instance?.syncActiveNotifications()
         }

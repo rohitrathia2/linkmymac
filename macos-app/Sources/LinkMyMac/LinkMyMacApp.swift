@@ -37,6 +37,27 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         NSApp.setActivationPolicy(.regular)
         NSApp.activate(ignoringOtherApps: true)
 
+        #if DEBUG
+        if let mode = MacP2PClient.previewMode { // design checks: sample data, no network
+            MacP2PClient.shared.loadPreviewData(paired: mode != "pairing")
+            if let look = ProcessInfo.processInfo.environment["LINKMYMAC_PREVIEW_APPEARANCE"] {
+                NSApp.appearance = NSAppearance(named: look == "dark" ? .darkAqua : .aqua)
+            }
+            if let path = ProcessInfo.processInfo.environment["LINKMYMAC_PREVIEW_SNAPSHOT"] {
+                Task { @MainActor in // render our own window to a PNG (needs no screen-recording permission), then quit
+                    try? await Task.sleep(for: .seconds(2.5))
+                    guard let window = NSApp.windows.filter(\.isVisible).max(by: { $0.frame.width < $1.frame.width }),
+                          let view = window.contentView?.superview ?? window.contentView,
+                          let rep = view.bitmapImageRepForCachingDisplay(in: view.bounds) else { exit(1) }
+                    view.cacheDisplay(in: view.bounds, to: rep)
+                    try? rep.representation(using: .png, properties: [:])?.write(to: URL(fileURLWithPath: path))
+                    exit(0)
+                }
+            }
+            return
+        }
+        #endif
+
         let sub = MacSubsystems(p2pClient: MacP2PClient.shared)
         sub.startClipboardMonitor()
         self.subsystems = sub
@@ -73,16 +94,17 @@ struct LinkMyMacApp: App {
     @StateObject private var p2pClient = MacP2PClient.shared
 
     var body: some Scene {
-        WindowGroup("UniBridge (LinkMyMac)") {
+        WindowGroup("LinkMyMac") {
             DashboardView(p2pClient: p2pClient)
-                .frame(minWidth: 920, minHeight: 620)
+                .frame(minWidth: 1040, minHeight: 680)
         }
+        .defaultSize(width: 1200, height: 760)
         .windowStyle(.titleBar)
         .windowToolbarStyle(.unified(showsTitle: true))
 
-        MenuBarExtra("UniBridge", systemImage: p2pClient.connectedDeviceName != nil ? "iphone.radiowaves.left.and.right" : "iphone.slash") {
+        MenuBarExtra("LinkMyMac", systemImage: p2pClient.connectedDeviceName != nil ? "iphone.radiowaves.left.and.right" : "iphone.slash") {
             VStack(alignment: .leading, spacing: 8) {
-                Text(p2pClient.connectedDeviceName ?? "No Android Connected")
+                Text(p2pClient.connectedDeviceName ?? "No phone connected")
                     .font(.headline)
 
                 Text("Status: \(p2pClient.connectionState)")
@@ -90,17 +112,17 @@ struct LinkMyMacApp: App {
                     .foregroundColor(.secondary)
 
                 if let battery = p2pClient.remoteBatteryPercent {
-                    Text("Phone Battery: \(battery)%")
+                    Text("Phone battery: \(battery)%")
                         .font(.caption)
                 }
 
                 Divider()
 
-                Button("Connect via USB Tunnel (127.0.0.1:8765)") {
+                Button("Connect over USB (127.0.0.1:8765)") {
                     p2pClient.connectDirect(host: "127.0.0.1", port: 8765)
                 }
 
-                Button("Refresh Media Gallery") {
+                Button("Refresh Photos and Videos") {
                     p2pClient.requestMediaIndex(offset: 0, limit: 30)
                 }
 
@@ -116,7 +138,7 @@ struct LinkMyMacApp: App {
 
                 Divider()
 
-                Button("Quit UniBridge") {
+                Button("Quit LinkMyMac") {
                     NSApplication.shared.terminate(nil)
                 }
             }
@@ -138,32 +160,43 @@ struct MediaFolder: Identifiable {
  * Navigation Tab Enum for Sidebar Selection
  * -----------------------------------------------------------------------------
  */
+extension DashboardTab {
+    /// Overview, or `LINKMYMAC_PREVIEW_TAB=<case>` in debug builds (design checks).
+    static var initial: DashboardTab {
+        #if DEBUG
+        if let raw = ProcessInfo.processInfo.environment["LINKMYMAC_PREVIEW_TAB"],
+           let tab = allCases.first(where: { "\($0)" == raw }) { return tab }
+        #endif
+        return .overview
+    }
+}
+
 enum DashboardTab: String, CaseIterable, Identifiable {
+    case overview = "Overview"
     case notifications = "Notifications"
     case photos = "Photos"
     case videos = "Videos"
-    case files = "File Sharing"
+    case files = "Files"
     case messages = "Messages"
     case calls = "Calls"
     case phoneScreen = "Phone Screen"
-    case camera = "FaceTime Camera"
-    case clipboard = "Universal Clipboard"
-    case qrPairing = "QR Code Pairing"
+    case camera = "Camera"
+    case clipboard = "Clipboard"
 
     var id: String { rawValue }
 
     var iconName: String {
         switch self {
-        case .notifications: return "bell.badge.fill"
-        case .photos: return "photo.on.rectangle.angled"
-        case .videos: return "film.stack"
-        case .files: return "arrow.up.arrow.down.circle.fill"
-        case .messages: return "message.fill"
-        case .calls: return "phone.fill"
-        case .phoneScreen: return "iphone.gen3"
-        case .camera: return "video.fill"
-        case .clipboard: return "doc.on.clipboard.fill"
-        case .qrPairing: return "qrcode.viewfinder"
+        case .overview: return "square.grid.2x2"
+        case .notifications: return "bell"
+        case .photos: return "photo"
+        case .videos: return "video"
+        case .files: return "folder"
+        case .messages: return "message"
+        case .calls: return "phone"
+        case .phoneScreen: return "iphone"
+        case .camera: return "camera"
+        case .clipboard: return "clipboard"
         }
     }
 }
@@ -194,7 +227,7 @@ enum DashboardTab: String, CaseIterable, Identifiable {
  */
 struct DashboardView: View {
     @ObservedObject var p2pClient: MacP2PClient
-    @State private var selectedTab: DashboardTab = .notifications
+    @State private var selectedTab: DashboardTab = .initial
 
     // Sub-view UI States
     @State private var manualHost: String = UserDefaults.standard.string(forKey: MacP2PClient.lastHostKey) ?? "127.0.0.1"
@@ -218,16 +251,26 @@ struct DashboardView: View {
     @State private var notificationSearchText: String = ""
     @State private var photoSearchText: String = ""
     @State private var showFaceTimeGuide: Bool = false
+    @State private var showQRPairing = false
+    @State private var selectedMediaID: String?
 
     var body: some View {
         NavigationSplitView {
-            sidebarContent
-                .navigationSplitViewColumnWidth(min: 260, ideal: 280, max: 320)
+            SidebarView(client: p2pClient, phone: p2pClient.phone, selection: $selectedTab)
+                .toolbar(removing: .sidebarToggle)
+                .navigationSplitViewColumnWidth(min: 240, ideal: 252, max: 300)
         } detail: {
             detailContent
-                .background(Color(NSColor.windowBackgroundColor))
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .background(Theme.canvas)
         }
-        .onChange(of: selectedTab) { photoSearchText = "" } // each section starts unfiltered
+        .onChange(of: selectedTab) { // each section starts unfiltered, nothing selected
+            photoSearchText = ""
+            selectedMediaID = nil
+        }
+        .sheet(isPresented: $showQRPairing) {
+            qrPairingSheet
+        }
         .sheet(isPresented: $isShowingQRScanner) {
             QRCameraScannerSheet(p2pClient: p2pClient, isPresented: $isShowingQRScanner)
         }
@@ -238,11 +281,11 @@ struct DashboardView: View {
             PhotoDetailPreviewSheet(item: item, p2pClient: p2pClient, autoplay: previewAutoplay)
         }
         .confirmationDialog(
-            itemPendingDeletion?.isVideo == true ? "Permanently Delete Video?" : "Permanently Delete Photo?",
+            itemPendingDeletion?.isVideo == true ? "Delete this video from your phone?" : "Delete this photo from your phone?",
             isPresented: $showDeleteConfirmation,
             titleVisibility: .visible
         ) {
-            Button("Delete from Android Phone", role: .destructive) {
+            Button("Delete from Phone", role: .destructive) {
                 if let item = itemPendingDeletion {
                     p2pClient.deleteMediaItem(mediaId: item.id)
                     itemPendingDeletion = nil
@@ -252,365 +295,116 @@ struct DashboardView: View {
                 itemPendingDeletion = nil
             }
         } message: {
-            Text("It will be permanently removed from your Android device's storage.")
+            Text("It’s removed from your phone’s storage for good.")
         }
     }
 
     // =========================================================================
-    // Sidebar: Branding, Device Telemetry & Navigation Tabs
-    // =========================================================================
-    private var sidebarContent: some View {
-        VStack(spacing: 0) {
-            // Header: UniBridge Branding
-            HStack(spacing: 12) {
-                if let logoUrl = Bundle.main.url(forResource: "logo", withExtension: "png"),
-                   let logoImage = NSImage(contentsOf: logoUrl) {
-                    Image(nsImage: logoImage)
-                        .resizable()
-                        .scaledToFit()
-                        .frame(width: 48, height: 48)
-                        .cornerRadius(10)
-                        .shadow(color: Color.blue.opacity(0.35), radius: 6, y: 2)
-                } else {
-                    Image(systemName: "infinity.circle.fill")
-                        .font(.system(size: 40))
-                        .foregroundColor(.blue)
-                }
-
-                VStack(alignment: .leading, spacing: 2) {
-                    Text("UniBridge")
-                        .font(.title3.bold())
-                    Text("Apple Continuity for Android")
-                        .font(.caption2)
-                        .foregroundColor(.secondary)
-                }
-                Spacer()
-            }
-            .padding(.horizontal, 16)
-            .padding(.vertical, 14)
-
-            Divider()
-
-            // Paired Device Card
-            VStack(alignment: .leading, spacing: 10) {
-                HStack(spacing: 8) {
-                    Circle()
-                        .fill(p2pClient.isPaired ? Color.green : Color.orange)
-                        .frame(width: 10, height: 10)
-                        .shadow(color: p2pClient.isPaired ? Color.green.opacity(0.6) : Color.clear, radius: 4)
-
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text(p2pClient.connectedDeviceName ?? "Searching for Android...")
-                            .font(.subheadline.bold())
-                            .lineLimit(1)
-                        Text(p2pClient.connectionState)
-                            .font(.caption2)
-                            .foregroundColor(.secondary)
-                    }
-
-                    Spacer()
-
-                    if let battery = p2pClient.remoteBatteryPercent {
-                        HStack(spacing: 4) {
-                            Image(systemName: batteryIcon(for: battery))
-                                .font(.caption)
-                                .foregroundColor(batteryColor(for: battery))
-                            Text("\(battery)%")
-                                .font(.caption2.bold())
-                                .foregroundColor(.primary)
-                        }
-                        .padding(.horizontal, 6)
-                        .padding(.vertical, 3)
-                        .background(Color.secondary.opacity(0.12))
-                        .cornerRadius(6)
-                    }
-                }
-
-                // Transport Pill & Reconnect
-                HStack {
-                    Label(
-                        p2pClient.connectedDeviceName != nil
-                            ? (p2pClient.isWirelessConnection ? "Wi-Fi LAN Active" : "USB Tunnel Active")
-                            : (p2pClient.discoveredPeers.first != nil ? "Wi-Fi Device Found" : p2pClient.directEndpointLabel),
-                        systemImage: p2pClient.isWirelessConnection ? "wifi" : "cable.connector"
-                    )
-                    .font(.caption2.bold())
-                    .foregroundColor(p2pClient.isWirelessConnection ? .cyan : .secondary)
-
-                    Spacer()
-
-                    if let peer = p2pClient.discoveredPeers.first, p2pClient.connectedDeviceName == nil {
-                        Button("Connect Wi-Fi") {
-                            p2pClient.connect(to: peer)
-                        }
-                        .buttonStyle(.borderedProminent)
-                        .controlSize(.mini)
-                    } else {
-                        Button {
-                            p2pClient.reconnect()
-                        } label: {
-                            Image(systemName: "arrow.clockwise")
-                                .font(.caption2)
-                        }
-                        .buttonStyle(.plain)
-                        .help("Reconnect (Wi-Fi if the phone is visible, otherwise \(p2pClient.directEndpointLabel))")
-                    }
-                }
-
-                if p2pClient.needsPairingCode {
-                    VStack(alignment: .leading, spacing: 6) {
-                        Text("Enter the code shown in LinkMyMac on your phone")
-                            .font(.caption2)
-                            .foregroundColor(.secondary)
-                        HStack(spacing: 6) {
-                            TextField("ABC 123", text: $pairingCodeInput)
-                                .textFieldStyle(.roundedBorder)
-                                .font(.system(.body, design: .monospaced))
-                                .onSubmit(submitPairingCode)
-                            Button("Pair", action: submitPairingCode)
-                                .buttonStyle(.borderedProminent)
-                                .controlSize(.small)
-                                .disabled(normalizedPairingCode.count < 6)
-                        }
-                    }
-                }
-                if let error = p2pClient.pairingError {
-                    Text(error)
-                        .font(.caption2)
-                        .foregroundColor(.red)
-                }
-                if p2pClient.isPaired {
-                    PhoneStatusRow(phone: p2pClient.phone)
-                }
-            }
-            .padding(12)
-            .background(Color.secondary.opacity(0.08))
-            .cornerRadius(12)
-            .padding(.horizontal, 12)
-            .padding(.vertical, 10)
-
-            // Primary Navigation Items
-            List(DashboardTab.allCases, selection: $selectedTab) { tab in
-                NavigationLink(value: tab) {
-                    HStack(spacing: 12) {
-                        Image(systemName: tab.iconName)
-                            .font(.system(size: 15))
-                            .foregroundColor(tabColor(for: tab))
-                            .frame(width: 22)
-
-                        Text(tab.rawValue)
-                            .font(.subheadline)
-
-                        Spacer()
-
-                        // Contextual Badges
-                        switch tab {
-                        case .notifications:
-                            if !p2pClient.notifications.isEmpty {
-                                Text("\(p2pClient.notifications.count)")
-                                    .font(.caption2.bold())
-                                    .foregroundColor(.white)
-                                    .padding(.horizontal, 7)
-                                    .padding(.vertical, 2)
-                                    .background(Capsule().fill(Color.red))
-                            }
-                        case .photos, .videos:
-                            if let total = p2pClient.mediaTotals[tab == .videos ? .videos : .photos] {
-                                Text("\(total)")
-                                    .font(.caption2)
-                                    .foregroundColor(.secondary)
-                            }
-                        case .files:
-                            let active = p2pClient.transfers.filter { $0.status == .inProgress }.count
-                            if active > 0 {
-                                Text("\(active)")
-                                    .font(.caption2.bold())
-                                    .foregroundColor(.white)
-                                    .padding(.horizontal, 7)
-                                    .padding(.vertical, 2)
-                                    .background(Capsule().fill(Color.teal))
-                            }
-                        case .camera:
-                            if p2pClient.isCameraStreaming {
-                                HStack(spacing: 4) {
-                                    Circle().fill(Color.red).frame(width: 6, height: 6)
-                                    Text("LIVE")
-                                        .font(.system(size: 9, weight: .heavy))
-                                        .foregroundColor(.white)
-                                }
-                                .padding(.horizontal, 6)
-                                .padding(.vertical, 2)
-                                .background(Capsule().fill(Color.red.opacity(0.85)))
-                            }
-                        case .clipboard:
-                            Circle()
-                                .fill(Color.green)
-                                .frame(width: 6, height: 6)
-                        case .messages, .calls, .phoneScreen:
-                            PhoneTabBadge(phone: p2pClient.phone, tab: tab)
-                        case .qrPairing:
-                            EmptyView()
-                        }
-                    }
-                    .padding(.vertical, 4)
-                }
-            }
-            .listStyle(.sidebar)
-
-            Spacer()
-
-            // Discovered Bonjour Peers Section
-            if !p2pClient.discoveredPeers.isEmpty {
-                VStack(alignment: .leading, spacing: 6) {
-                    Text("LAN Discovered Devices")
-                        .font(.caption2.bold())
-                        .foregroundColor(.secondary)
-                        .padding(.horizontal, 16)
-
-                    ForEach(p2pClient.discoveredPeers) { peer in
-                        Button {
-                            p2pClient.connect(to: peer)
-                        } label: {
-                            HStack {
-                                Image(systemName: "iphone.gen3")
-                                    .font(.caption)
-                                    .foregroundColor(.blue)
-                                Text(peer.name)
-                                    .font(.caption)
-                                    .lineLimit(1)
-                                Spacer()
-                                Text("Connect")
-                                    .font(.caption2)
-                                    .foregroundColor(.accentColor)
-                            }
-                            .padding(.horizontal, 12)
-                            .padding(.vertical, 6)
-                            .background(Color.secondary.opacity(0.06))
-                            .cornerRadius(8)
-                        }
-                        .buttonStyle(.plain)
-                        .padding(.horizontal, 12)
-                    }
-                }
-                .padding(.bottom, 8)
-            }
-        }
-    }
-
-    // =========================================================================
-    // Detail Switcher: Selects Sub-View by Sidebar Selection
+    // Detail: the pairing screen until a phone is paired, then the selected tab
     // =========================================================================
     @ViewBuilder
     private var detailContent: some View {
-        switch selectedTab {
-        case .notifications:
-            notificationsDetailView
-        case .photos:
-            mediaGalleryView(.photos)
-        case .videos:
-            mediaGalleryView(.videos)
-        case .files:
-            filesDetailView
-        case .camera:
-            cameraDetailView
-        case .clipboard:
-            clipboardDetailView
-        case .messages:
-            MessagesView(phone: p2pClient.phone)
-        case .calls:
-            CallsView(phone: p2pClient.phone)
-        case .phoneScreen:
-            PhoneScreenView(phone: p2pClient.phone)
-        case .qrPairing:
+        if !p2pClient.isPaired {
+            PairingScreen(client: p2pClient, code: $pairingCodeInput, submit: submitPairingCode, showQR: { showQRPairing = true })
+                .navigationTitle("Pair a phone")
+                .toolbar {
+                    ToolbarItem(placement: .primaryAction) {
+                        Button("Scan QR code") { showQRPairing = true }.buttonStyle(.lmSecondary)
+                    }
+                }
+        } else {
+            switch selectedTab {
+            case .overview:
+                OverviewScreen(client: p2pClient, phone: p2pClient.phone) { selectedTab = $0 }
+                    .navigationTitle("Overview")
+                    .toolbar {
+                        ToolbarItem(placement: .primaryAction) {
+                            HStack(spacing: 10) {
+                                StatusChip(tone: .success, label: p2pClient.isWirelessConnection ? "Connected over Wi‑Fi" : "Connected over USB")
+                                Button("Send a file") { chooseFilesAndSend(to: p2pClient) }.buttonStyle(.lmSecondary)
+                            }
+                        }
+                    }
+            case .notifications:
+                notificationsDetailView
+            case .photos:
+                mediaGalleryView(.photos)
+            case .videos:
+                mediaGalleryView(.videos)
+            case .files:
+                filesDetailView
+            case .camera:
+                cameraDetailView
+            case .clipboard:
+                clipboardDetailView
+            case .messages:
+                MessagesView(phone: p2pClient.phone)
+            case .calls:
+                CallsView(phone: p2pClient.phone)
+            case .phoneScreen:
+                PhoneScreenView(phone: p2pClient.phone)
+            }
+        }
+    }
+
+    /// QR code and manual-address pairing, opened from the pairing screen.
+    private var qrPairingSheet: some View {
+        VStack(spacing: 0) {
+            HStack {
+                Text("Other ways to connect").font(.lmTitle).foregroundStyle(Theme.textPrimary)
+                Spacer()
+                Button("Done") { showQRPairing = false }.buttonStyle(.lmSecondary).keyboardShortcut(.cancelAction)
+            }
+            .padding(16)
+            Hairline()
             qrPairingDetailView
         }
+        .frame(width: 660, height: 640)
+        .background(Theme.canvas)
     }
 
     // =========================================================================
     // Scope 1: Notifications Detail View
     // =========================================================================
     private var notificationsDetailView: some View {
-        VStack(spacing: 0) {
-            // Header Bar
-            HStack(spacing: 12) {
-                VStack(alignment: .leading, spacing: 2) {
-                    Text("Mirrored Notifications")
-                        .font(.title2.bold())
-                    Text("\(filteredNotifications.count) active alerts from Android")
-                        .font(.caption)
-                        .foregroundColor(.secondary)
-                }
-
-                Spacer()
-
-                // Search Bar
-                HStack(spacing: 6) {
-                    Image(systemName: "magnifyingglass")
-                        .font(.caption)
-                        .foregroundColor(.secondary)
-                    TextField("Filter notifications...", text: $notificationSearchText)
-                        .textFieldStyle(.plain)
-                        .font(.caption)
-                        .frame(width: 140)
-                }
-                .padding(.horizontal, 8)
-                .padding(.vertical, 5)
-                .background(Color.secondary.opacity(0.1))
-                .cornerRadius(8)
-
-                if !p2pClient.notifications.isEmpty {
-                    Button(role: .destructive) {
-                        p2pClient.clearAllNotificationsOnAndroid()
-                    } label: {
-                        Label("Clear All on Android", systemImage: "trash")
-                    }
-                    .buttonStyle(.bordered)
-                    .help("Dismiss all clearable notifications from the Android status bar")
-                }
-
-                Button {
-                    p2pClient.requestNotificationSync()
-                } label: {
-                    Label("Sync", systemImage: "arrow.clockwise")
-                }
-                .buttonStyle(.bordered)
-            }
-            .padding(.horizontal, 20)
-            .padding(.vertical, 14)
-            .background(Color(NSColor.controlBackgroundColor).opacity(0.6))
-
-            Divider()
-
+        Group {
             if filteredNotifications.isEmpty {
-                VStack(spacing: 14) {
-                    Spacer()
-                    Image(systemName: "bell.slash.fill")
-                        .font(.system(size: 48))
-                        .foregroundColor(.secondary.opacity(0.6))
-                    Text("No Notifications")
-                        .font(.title3.bold())
-                    Text("Active notifications from WhatsApp, Messages, Slack, and other apps will appear here.")
-                        .font(.caption)
-                        .foregroundColor(.secondary)
-                        .multilineTextAlignment(.center)
-                        .frame(maxWidth: 320)
-
-                    Button("Sync From Phone") {
-                        p2pClient.requestNotificationSync()
-                    }
-                    .buttonStyle(.borderedProminent)
-                    Spacer()
-                }
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                EmptyStateView(symbol: "bell.slash",
+                               title: notificationSearchText.isEmpty ? "No notifications" : "No matches",
+                               message: notificationSearchText.isEmpty
+                                   ? "Notifications from your phone’s apps show up here as they arrive."
+                                   : "Nothing matches “\(notificationSearchText)”.",
+                               actionTitle: notificationSearchText.isEmpty ? "Sync from phone" : nil,
+                               action: notificationSearchText.isEmpty ? { p2pClient.requestNotificationSync() } : nil)
             } else {
                 ScrollView {
-                    LazyVStack(spacing: 10) {
-                        ForEach(filteredNotifications) { notif in
-                            notificationCard(notif)
+                    LazyVStack(alignment: .leading, spacing: 12) {
+                        ForEach(Array(notificationGroups.enumerated()), id: \.element.label) { index, group in
+                            HStack {
+                                SectionLabel(text: group.label)
+                                Spacer()
+                                if index == 0 {
+                                    Text("Replies and buttons run on your phone").font(.lmCaption).foregroundStyle(Theme.textTertiary)
+                                }
+                            }
+                            .padding(.top, index == 0 ? 0 : 8)
+                            ForEach(group.items) { notificationCard($0) }
                         }
                     }
-                    .padding(16)
+                    .padding(.horizontal, 24).padding(.vertical, 20)
                 }
+            }
+        }
+        .navigationTitle("Notifications")
+        .navigationSubtitle("\(p2pClient.notifications.count) from your phone")
+        .toolbar {
+            ToolbarItemGroup(placement: .primaryAction) {
+                LMSearchField(placeholder: "Filter notifications", text: $notificationSearchText, width: 200)
+                Button("Clear all on phone") { p2pClient.clearAllNotificationsOnAndroid() }
+                    .buttonStyle(.lmSecondary)
+                    .disabled(p2pClient.notifications.isEmpty)
+                    .help("Dismiss every clearable notification on your phone")
+                IconButton(symbol: "arrow.clockwise", help: "Sync from phone") { p2pClient.requestNotificationSync() }
             }
         }
     }
@@ -628,106 +422,78 @@ struct DashboardView: View {
         }
     }
 
+    /// Notifications in arrival order, split into Today / Yesterday / weekday groups.
+    private var notificationGroups: [(label: String, items: [MirroredNotification])] {
+        var groups: [(label: String, items: [MirroredNotification])] = []
+        for n in filteredNotifications {
+            let label = dayLabel(n.postTimeMs)
+            if groups.last?.label == label { groups[groups.count - 1].items.append(n) } else { groups.append((label, [n])) }
+        }
+        return groups
+    }
+
+    private func dayLabel(_ postTimeMs: Int64) -> String {
+        guard postTimeMs > 0 else { return "Earlier" }
+        let date = Date(timeIntervalSince1970: TimeInterval(postTimeMs) / 1000)
+        if Calendar.current.isDateInToday(date) { return "Today" }
+        if Calendar.current.isDateInYesterday(date) { return "Yesterday" }
+        return date.formatted(.dateTime.weekday(.wide).day().month())
+    }
+
+    /// One mirrored notification (Figma Mac/Notification card): app icon, text, the app's
+    /// own buttons, inline reply, dismiss. Buttons and replies run on the phone.
     private func notificationCard(_ notif: MirroredNotification) -> some View {
-        VStack(alignment: .leading, spacing: 10) {
-            HStack(alignment: .top, spacing: 12) {
-                // Real Brand App Icon
-                if let iconData = notif.appIconData,
-                   let nsImage = NSImage(data: iconData) {
-                    Image(nsImage: nsImage)
-                        .resizable()
-                        .scaledToFit()
-                        .frame(width: 36, height: 36)
-                        .cornerRadius(8)
-                        .shadow(color: Color.black.opacity(0.15), radius: 2, y: 1)
-                } else {
-                    ZStack {
-                        RoundedRectangle(cornerRadius: 8)
-                            .fill(Color.blue.opacity(0.15))
-                            .frame(width: 36, height: 36)
-                        Image(systemName: "app.badge.fill")
-                            .font(.system(size: 18))
-                            .foregroundColor(.blue)
+        let reply = notif.actions.first(where: { $0.supportsInlineReply })
+        let buttons = notif.actions.filter { !$0.supportsInlineReply }
+        return HStack(alignment: .top, spacing: 14) {
+            NotificationAppIcon(data: notif.appIconData, size: 36)
+            VStack(alignment: .leading, spacing: 3) {
+                HStack(spacing: 6) {
+                    Text(notif.appName).font(.lmCaption).foregroundStyle(Theme.textSecondary)
+                    if notif.postTimeMs > 0 {
+                        Text("·").font(.lmCaption).foregroundStyle(Theme.textTertiary)
+                        Text(formatNotificationTime(notif.postTimeMs)).font(.lmCaption).foregroundStyle(Theme.textTertiary)
                     }
                 }
-
-                VStack(alignment: .leading, spacing: 3) {
-                    HStack(spacing: 6) {
-                        Text(notif.appName)
-                            .font(.subheadline.bold())
-                            .foregroundColor(.primary)
-
-                        if notif.postTimeMs > 0 {
-                            Text("•")
-                                .font(.caption2)
-                                .foregroundColor(.secondary)
-                            Text(formatNotificationTime(notif.postTimeMs))
-                                .font(.caption2)
-                                .foregroundColor(.secondary)
+                if !notif.title.isEmpty {
+                    Text(notif.title).font(.lmHeadline).foregroundStyle(Theme.textPrimary)
+                }
+                if !notif.body.isEmpty {
+                    Text(notif.body).font(.lmBody).foregroundStyle(Theme.textSecondary).lineLimit(2)
+                }
+                if !buttons.isEmpty {
+                    HStack(spacing: 8) {
+                        ForEach(buttons, id: \.id) { action in
+                            Button(action.title) {
+                                p2pClient.sendNotificationReply(notificationKey: notif.id, actionId: action.id, replyText: "")
+                            }
+                            .buttonStyle(.lmSecondary)
                         }
                     }
-
-                    if !notif.title.isEmpty {
-                        Text(notif.title)
-                            .font(.headline)
-                            .foregroundColor(.primary)
-                    }
-
-                    if !notif.body.isEmpty {
-                        Text(notif.body)
-                            .font(.body)
-                            .foregroundColor(.secondary)
-                    }
+                    .padding(.top, 8)
                 }
-
-                Spacer()
-
-                Button {
-                    p2pClient.dismissNotificationOnAndroid(key: notif.id)
-                } label: {
-                    Image(systemName: "xmark.circle.fill")
-                        .font(.system(size: 16))
-                        .foregroundColor(.secondary.opacity(0.7))
+                if let reply {
+                    HStack(spacing: 8) {
+                        TextField(reply.replyPlaceholder.isEmpty ? "Reply" : reply.replyPlaceholder,
+                                  text: Binding(get: { replyTexts[notif.id] ?? "" }, set: { replyTexts[notif.id] = $0 }))
+                            .textFieldStyle(LMTextFieldStyle())
+                            .onSubmit { submitReply(for: notif, action: reply) }
+                        Button("Send") { submitReply(for: notif, action: reply) }
+                            .buttonStyle(.lmPrimary)
+                            .disabled((replyTexts[notif.id] ?? "").isEmpty)
+                    }
+                    .padding(.top, 8)
                 }
-                .buttonStyle(.plain)
-                .help("Dismiss Notification on Mac & Android")
             }
-
-            // Inline Reply Composer
-            if let replyAction = notif.actions.first(where: { $0.supportsInlineReply }) {
-                HStack(spacing: 8) {
-                    TextField(
-                        replyAction.replyPlaceholder,
-                        text: Binding(
-                            get: { replyTexts[notif.id] ?? "" },
-                            set: { replyTexts[notif.id] = $0 }
-                        )
-                    )
-                    .textFieldStyle(.roundedBorder)
-                    .onSubmit {
-                        submitReply(for: notif, action: replyAction)
-                    }
-
-                    Button("Reply") {
-                        submitReply(for: notif, action: replyAction)
-                    }
-                    .buttonStyle(.borderedProminent)
-                    .controlSize(.small)
-                    .disabled((replyTexts[notif.id] ?? "").isEmpty)
-                }
-                .padding(.leading, 48)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            IconButton(symbol: "xmark", help: "Dismiss on your Mac and phone", tint: Theme.textTertiary) {
+                p2pClient.dismissNotificationOnAndroid(key: notif.id)
             }
         }
-        .padding(14)
-        .background(
-            RoundedRectangle(cornerRadius: 12)
-                .fill(Color(NSColor.controlBackgroundColor))
-                .shadow(color: Color.black.opacity(0.04), radius: 3, y: 1)
-        )
-        .overlay(
-            RoundedRectangle(cornerRadius: 12)
-                .stroke(Color.primary.opacity(0.06), lineWidth: 1)
-        )
+        .padding(.horizontal, 16).padding(.vertical, 14)
+        .background(Theme.surface, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+        .overlay(RoundedRectangle(cornerRadius: 14, style: .continuous).strokeBorder(Theme.borderSubtle))
+        .shadow(color: .black.opacity(0.04), radius: 1, y: 1)
     }
 
     private func submitReply(for notif: MirroredNotification, action: NotificationActionOption) {
@@ -742,132 +508,86 @@ struct DashboardView: View {
     }
 
     // =========================================================================
-    // Scope 2: Photos and Videos (one sidebar section each, paged separately)
+    // Photos and Videos (Figma: Mac · Photos, Mac · Videos). Paged separately.
     // =========================================================================
     private func mediaGalleryView(_ kind: MediaKind) -> some View {
         let isVideos = kind == .videos
         let items = filteredMediaItems(kind)
         let loaded = p2pClient.mediaItems(kind).count
         let total = p2pClient.mediaTotals[kind]
-        let syncTitle = isVideos ? "Sync All Videos" : "Sync All Photos"
-        return VStack(spacing: 0) {
-            // Header Bar
-            HStack(spacing: 12) {
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(isVideos ? "Videos" : "Photos")
-                        .font(.title2.bold())
-                    Text("\(loaded) loaded\(total.map { " of \($0) on the phone" } ?? "")")
-                        .font(.caption)
-                        .foregroundColor(.secondary)
-                }
-
-                Spacer()
-
-                // Search Bar
-                HStack(spacing: 6) {
-                    Image(systemName: "magnifyingglass")
-                        .font(.caption)
-                        .foregroundColor(.secondary)
-                    TextField(isVideos ? "Search videos..." : "Search photos...", text: $photoSearchText)
-                        .textFieldStyle(.plain)
-                        .font(.caption)
-                        .frame(width: 140)
-                }
-                .padding(.horizontal, 8)
-                .padding(.vertical, 5)
-                .background(Color.secondary.opacity(0.1))
-                .cornerRadius(8)
-
-                Button {
-                    groupMediaByFolder.toggle()
-                } label: {
-                    Label(groupMediaByFolder ? "Ungroup" : "Group by Folder",
-                          systemImage: groupMediaByFolder ? "square.grid.2x2" : "folder")
-                }
-                .buttonStyle(.bordered)
-                .help("Group by the folder each item is stored in on the phone (Camera, Screenshots, WhatsApp…)")
-
-                if p2pClient.syncingKind == kind {
-                    HStack(spacing: 6) {
-                        ProgressView().controlSize(.small)
-                        Text("Syncing (\(loaded)\(total.map { "/\($0)" } ?? ""))...")
-                            .font(.caption2.bold())
-                    }
-                    .padding(.horizontal, 10)
-                    .padding(.vertical, 6)
-                    .background(Color.secondary.opacity(0.12))
-                    .cornerRadius(8)
-                } else {
-                    Button {
-                        p2pClient.syncAllGallery(kind)
-                    } label: {
-                        Label(syncTitle, systemImage: "arrow.triangle.2.circlepath")
-                    }
-                    .buttonStyle(.borderedProminent)
-                    .disabled(p2pClient.syncingKind != nil) // one sync at a time
-                }
-
-                Button {
-                    p2pClient.requestMediaIndex(kind, offset: 0, limit: 50)
-                } label: {
-                    Label("Refresh", systemImage: "arrow.clockwise")
-                }
-                .buttonStyle(.bordered)
-            }
-            .padding(.horizontal, 20)
-            .padding(.vertical, 14)
-            .background(Color(NSColor.controlBackgroundColor).opacity(0.6))
-
-            Divider()
-
+        let noun = isVideos ? "video" : "photo"
+        let selected = items.first { $0.id == selectedMediaID }
+        return Group {
             if items.isEmpty {
-                VStack(spacing: 14) {
-                    Spacer()
-                    Image(systemName: isVideos ? "film.stack" : "photo.on.rectangle.angled")
-                        .font(.system(size: 48))
-                        .foregroundColor(.secondary.opacity(0.6))
-                    Text(isVideos ? "No Videos Found" : "No Photos Found")
-                        .font(.title3.bold())
-                    Text("Click '\(syncTitle)' above to index them from your Android device.")
-                        .font(.caption)
-                        .foregroundColor(.secondary)
-                        .multilineTextAlignment(.center)
-                        .frame(maxWidth: 320)
-
-                    Button("Sync Now") {
-                        p2pClient.syncAllGallery(kind)
-                    }
-                    .buttonStyle(.borderedProminent)
-                    .disabled(p2pClient.syncingKind != nil)
-                    Spacer()
-                }
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                EmptyStateView(symbol: isVideos ? "video" : "photo",
+                               title: photoSearchText.isEmpty ? "No \(noun)s yet" : "No matches",
+                               message: photoSearchText.isEmpty
+                                   ? "Sync to browse the \(noun)s on your phone. Nothing is copied until you save it."
+                                   : "Nothing matches “\(photoSearchText)”.",
+                               actionTitle: photoSearchText.isEmpty ? "Sync \(noun)s" : nil,
+                               action: photoSearchText.isEmpty ? { p2pClient.syncAllGallery(kind) } : nil)
             } else {
                 ScrollView {
-                    LazyVGrid(columns: [GridItem(.adaptive(minimum: 170, maximum: 220), spacing: 14)], spacing: 14,
-                              pinnedViews: [.sectionHeaders]) {
+                    VStack(alignment: .leading, spacing: 20) {
+                        if isVideos, let playing = selected ?? items.first {
+                            nowPlaying(playing)
+                        }
                         if groupMediaByFolder {
                             ForEach(mediaFolders(items)) { folder in
-                                Section {
-                                    if !collapsedFolders.contains(folderKey(kind, folder)) {
-                                        ForEach(folder.items) { item in
-                                            mediaCard(item)
+                                let key = folderKey(kind, folder)
+                                let open = !collapsedFolders.contains(key)
+                                VStack(alignment: .leading, spacing: 10) {
+                                    FolderHeaderRow(name: folder.name,
+                                                    count: "\(folder.items.count) \(noun)\(folder.items.count == 1 ? "" : "s")",
+                                                    path: folder.path, expanded: open) {
+                                        withAnimation(.easeInOut(duration: 0.15)) {
+                                            if open { collapsedFolders.insert(key) } else { collapsedFolders.remove(key) }
                                         }
                                     }
-                                } header: {
-                                    folderHeader(folder, kind: kind)
+                                    .help(open ? "Collapse folder" : "Expand folder")
+                                    if open { mediaGrid(folder.items, videos: isVideos) }
                                 }
                             }
                         } else {
-                            ForEach(items) { item in
-                                mediaCard(item)
-                            }
+                            mediaGrid(items, videos: isVideos)
                         }
                     }
-                    .padding(16)
+                    .padding(.horizontal, 24).padding(.vertical, 20)
+                    .padding(.bottom, !isVideos && selected != nil ? 64 : 0) // room for the floating bar
+                }
+                .overlay(alignment: .bottom) {
+                    if !isVideos, let selected {
+                        selectionBar(selected).padding(.bottom, 18)
+                    }
                 }
             }
         }
+        .navigationTitle(isVideos ? "Videos" : "Photos")
+        .navigationSubtitle(gallerySubtitle(kind, loaded: loaded, total: total, noun: noun))
+        .toolbar {
+            ToolbarItemGroup(placement: .primaryAction) {
+                Picker("Group", selection: $groupMediaByFolder) {
+                    Text("All").tag(false)
+                    Text("By folder").tag(true)
+                }
+                .pickerStyle(.segmented)
+                .labelsHidden()
+                .help("Group by the folder each item is in on the phone (Camera, Screenshots…)")
+                LMSearchField(placeholder: isVideos ? "Search videos" : "Search photos", text: $photoSearchText, width: 180)
+                if p2pClient.syncingKind == kind {
+                    ProgressView().controlSize(.small).help("Syncing…")
+                } else {
+                    IconButton(symbol: "arrow.clockwise", help: "Sync all \(noun)s from your phone") { p2pClient.syncAllGallery(kind) }
+                        .disabled(p2pClient.syncingKind != nil) // one sync at a time
+                }
+            }
+        }
+    }
+
+    private func gallerySubtitle(_ kind: MediaKind, loaded: Int, total: Int?, noun: String) -> String {
+        if p2pClient.syncingKind == kind, let total { return "Syncing \(loaded.formatted()) of \(total.formatted())…" }
+        guard let total else { return loaded > 0 ? "\(loaded.formatted()) \(noun)s" : "" }
+        return loaded < total ? "\(loaded.formatted()) of \(total.formatted()) \(noun)s loaded" : "\(total.formatted()) \(noun)s"
     }
 
     /// Folders ordered by their newest item (items arrive newest-first), like Android's album list.
@@ -886,47 +606,6 @@ struct DashboardView: View {
         "\(kind.rawValue):\(folder.path)"
     }
 
-    /// Whole header toggles; the chevron points right when collapsed, down when open.
-    private func folderHeader(_ folder: MediaFolder, kind: MediaKind) -> some View {
-        let key = folderKey(kind, folder)
-        let collapsed = collapsedFolders.contains(key)
-        return Button {
-            withAnimation(.easeInOut(duration: 0.15)) {
-                if collapsed {
-                    collapsedFolders.remove(key)
-                } else {
-                    collapsedFolders.insert(key)
-                }
-            }
-        } label: {
-            HStack(spacing: 8) {
-                Image(systemName: "chevron.right")
-                    .font(.caption.bold())
-                    .foregroundColor(.secondary)
-                    .rotationEffect(.degrees(collapsed ? 0 : 90))
-                Image(systemName: "folder.fill")
-                    .foregroundColor(.accentColor)
-                Text(folder.name)
-                    .font(.headline)
-                Text(folder.path)
-                    .font(.caption)
-                    .foregroundColor(.secondary)
-                    .lineLimit(1)
-                    .truncationMode(.middle)
-                Spacer()
-                Text("\(folder.items.count)")
-                    .font(.caption.bold())
-                    .foregroundColor(.secondary)
-            }
-            .padding(.vertical, 8)
-            .padding(.horizontal, 4)
-            .contentShape(Rectangle())
-        }
-        .buttonStyle(.plain)
-        .background(Color(NSColor.windowBackgroundColor)) // pinned header: hide cards scrolling under it
-        .help(collapsed ? "Expand folder" : "Collapse folder")
-    }
-
     private func filteredMediaItems(_ kind: MediaKind) -> [RemoteMediaItem] {
         let items = p2pClient.mediaItems(kind)
         guard !photoSearchText.isEmpty else { return items }
@@ -934,411 +613,324 @@ struct DashboardView: View {
         return items.filter { $0.displayName.lowercased().contains(query) }
     }
 
-    private func mediaCard(_ item: RemoteMediaItem) -> some View {
-        VStack(alignment: .leading, spacing: 8) {
-            ZStack(alignment: .topTrailing) {
-                // Thumbnail: the grid column sets the size and the image fills it, cropped.
-                // scaledToFill + frame(height:) alone let a landscape thumbnail (most videos)
-                // claim 140 × 16/9 ≈ 249 pt and push the card past its column.
-                Color.gray.opacity(0.18)
-                    .frame(maxWidth: .infinity)
-                    .frame(height: 140)
-                    .overlay {
-                        if let data = item.thumbnailData,
-                           let nsImage = NSImage(data: data) {
-                            Image(nsImage: nsImage)
-                                .resizable()
-                                .scaledToFill()
-                        } else {
-                            Image(systemName: item.isVideo ? "film" : "photo")
-                                .font(.largeTitle)
-                                .foregroundColor(.gray)
-                        }
-                    }
-                    .clipped()
-                .overlay(alignment: .bottomLeading) {
-                    if item.isVideo {
-                        Label(formatDuration(item.durationMs), systemImage: "play.fill")
-                            .font(.caption2.bold())
-                            .foregroundColor(.white)
-                            .padding(.horizontal, 6)
-                            .padding(.vertical, 3)
-                            .background(Capsule().fill(Color.black.opacity(0.6)))
-                            .padding(6)
-                    }
-                }
-                .overlay {
-                    if item.isVideo {
-                        Button {
-                            previewAutoplay = true
-                            previewMediaItem = item
-                        } label: {
-                            Image(systemName: "play.circle.fill")
-                                .font(.system(size: 40))
-                                .symbolRenderingMode(.palette)
-                                .foregroundStyle(.white, .black.opacity(0.45))
-                        }
-                        .buttonStyle(.plain)
-                        .help("Play")
-                    }
-                }
-                .cornerRadius(10)
-                .contentShape(Rectangle())
-                .onTapGesture {
-                    previewAutoplay = false
-                    previewMediaItem = item
-                }
+    private func mediaGrid(_ items: [RemoteMediaItem], videos: Bool) -> some View {
+        LazyVGrid(columns: [GridItem(.adaptive(minimum: videos ? 168 : 132, maximum: videos ? 240 : 180), spacing: videos ? 12 : 8)],
+                  spacing: videos ? 12 : 8) {
+            ForEach(items) { mediaTile($0) }
+        }
+    }
 
-                // Downloaded badge
+    /// Thumbnail tile (Figma Mac/Media tile). Click selects, double-click opens.
+    private func mediaTile(_ item: RemoteMediaItem) -> some View {
+        let selected = selectedMediaID == item.id
+        return Color.clear
+            .aspectRatio(item.isVideo ? 16.0 / 9.0 : 1, contentMode: .fit)
+            .overlay {
+                if let data = item.thumbnailData, let image = NSImage(data: data) {
+                    Image(nsImage: image).resizable().scaledToFill()
+                } else {
+                    Image(systemName: item.isVideo ? "video" : "photo").font(.system(size: 22)).foregroundStyle(Theme.textTertiary)
+                }
+            }
+            .background(Theme.surfaceMuted)
+            .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+            .overlay(alignment: .bottomTrailing) {
+                if item.isVideo {
+                    Label(formatDuration(item.durationMs), systemImage: "play.fill")
+                        .font(.lmCaption).foregroundStyle(.white)
+                        .padding(.horizontal, 6).padding(.vertical, 2)
+                        .background(RoundedRectangle(cornerRadius: 6, style: .continuous).fill(.black.opacity(0.55)))
+                        .padding(6)
+                }
+            }
+            .overlay(alignment: .bottom) {
+                if let download = mediaDownload(for: item) {
+                    ProgressView(value: Double(download.bytesTransferred), total: Double(max(download.totalBytes, 1)))
+                        .tint(.white).padding(8)
+                }
+            }
+            .overlay(alignment: .topLeading) {
                 if p2pClient.localFileURL(for: item.id) != nil {
-                    Image(systemName: "checkmark.circle.fill")
-                        .foregroundColor(.green)
-                        .background(Circle().fill(Color.white))
+                    Image(systemName: "arrow.down.circle.fill").font(.system(size: 14))
+                        .symbolRenderingMode(.palette).foregroundStyle(.white, .black.opacity(0.45))
+                        .padding(6).help("Saved on this Mac")
+                }
+            }
+            .overlay {
+                if selected {
+                    RoundedRectangle(cornerRadius: 10, style: .continuous).strokeBorder(Theme.brand, lineWidth: 3)
+                }
+            }
+            .overlay(alignment: .topTrailing) {
+                if selected {
+                    Image(systemName: "checkmark").font(.system(size: 10, weight: .bold)).foregroundStyle(Theme.onBrand)
+                        .frame(width: 22, height: 22)
+                        .background(Circle().fill(Theme.brand))
+                        .overlay(Circle().strokeBorder(.white, lineWidth: 2))
                         .padding(8)
                 }
             }
-
-            VStack(alignment: .leading, spacing: 2) {
-                Text(item.displayName)
-                    .font(.caption.bold())
-                    .lineLimit(1)
-                Text("\(formatBytes(item.sizeBytes)) • \(item.width)×\(item.height)")
-                    .font(.caption2)
-                    .foregroundColor(.secondary)
-                if let download = mediaDownload(for: item) {
-                    ProgressView(value: Double(download.bytesTransferred), total: Double(max(download.totalBytes, 1)))
-                        .controlSize(.small)
-                }
+            .contentShape(Rectangle())
+            .onTapGesture(count: 2) {
+                previewAutoplay = item.isVideo
+                previewMediaItem = item
             }
+            .onTapGesture { selectedMediaID = selected ? nil : item.id }
+            .contextMenu {
+                Button("Open") { previewAutoplay = false; previewMediaItem = item }
+                Button("Save to Mac") { p2pClient.downloadFullResolutionMedia(mediaId: item.id) }
+                Button("Share…") { shareMediaItem(item) }
+                Divider()
+                Button("Delete from Phone…", role: .destructive) { itemPendingDeletion = item; showDeleteConfirmation = true }
+            }
+            .help(item.displayName)
+    }
 
-            // Action Toolbar
-            HStack(spacing: 8) {
-                Button {
-                    p2pClient.downloadFullResolutionMedia(mediaId: item.id)
-                } label: {
-                    Image(systemName: "arrow.down.circle.fill")
-                }
-                .buttonStyle(.plain)
-                .font(.system(size: 18))
-                .foregroundColor(.blue)
-                .help(item.isVideo ? "Download Video to ~/Downloads" : "Download Full Resolution Photo to ~/Downloads")
-
-                Button {
-                    shareMediaItem(item)
-                } label: {
-                    Image(systemName: "square.and.arrow.up.circle.fill")
-                }
-                .buttonStyle(.plain)
-                .font(.system(size: 18))
-                .foregroundColor(.accentColor)
-                .help("Share with AirDrop, Messages, Mail")
-
-                Spacer()
-
-                Button {
-                    itemPendingDeletion = item
-                    showDeleteConfirmation = true
-                } label: {
-                    Image(systemName: "trash.circle.fill")
-                }
-                .buttonStyle(.plain)
-                .font(.system(size: 18))
-                .foregroundColor(.red.opacity(0.85))
-                .help("Delete permanently from Android device")
+    /// Floating actions for the selected photo (Figma: Selection bar).
+    private func selectionBar(_ item: RemoteMediaItem) -> some View {
+        HStack(spacing: 4) {
+            Text("1 selected").font(.lmHeadline).foregroundStyle(Theme.textPrimary).padding(.leading, 10)
+            Rectangle().fill(Theme.textTertiary.opacity(0.35)).frame(width: 1, height: 20).padding(.horizontal, 6)
+            barButton("arrow.down.to.line", "Save to Mac") { p2pClient.downloadFullResolutionMedia(mediaId: item.id) }
+            barButton("square.and.arrow.up", "Share…") { shareMediaItem(item) }
+            barButton("trash", "Delete from phone", tint: Theme.danger) {
+                itemPendingDeletion = item
+                showDeleteConfirmation = true
             }
         }
-        .padding(10)
-        .background(
-            RoundedRectangle(cornerRadius: 12)
-                .fill(Color(NSColor.controlBackgroundColor))
-                .shadow(color: Color.black.opacity(0.04), radius: 2, y: 1)
-        )
-        .overlay(
-            RoundedRectangle(cornerRadius: 12)
-                .stroke(Color.primary.opacity(0.06), lineWidth: 1)
-        )
+        .padding(6)
+        .background(Theme.surface, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+        .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous).strokeBorder(Theme.borderSubtle))
+        .shadow(color: .black.opacity(0.16), radius: 16, y: 12)
+    }
+
+    private func barButton(_ symbol: String, _ title: String, tint: Color = Theme.textPrimary, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Label(title, systemImage: symbol)
+                .font(.lmBody).foregroundStyle(tint)
+                .padding(.horizontal, 10).frame(height: 30)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+    }
+
+    /// Selected video: inline streaming player plus details (Figma: Now playing + Details).
+    private func nowPlaying(_ item: RemoteMediaItem) -> some View {
+        HStack(alignment: .top, spacing: 16) {
+            MediaPlayerPanel(item: item, client: p2pClient).id(item.id)
+            VStack(alignment: .leading, spacing: 12) {
+                Text(item.displayName).font(.lmTitle).foregroundStyle(Theme.textPrimary).lineLimit(2)
+                KeyValueRow(key: "Duration", value: formatDuration(item.durationMs))
+                KeyValueRow(key: "Size", value: formatBytes(item.sizeBytes))
+                KeyValueRow(key: "Resolution", value: "\(item.width) × \(item.height)")
+                KeyValueRow(key: "Folder", value: item.folderPath.isEmpty ? "—" : item.folderPath)
+                VStack(spacing: 8) {
+                    Button("Save to Mac") { p2pClient.downloadFullResolutionMedia(mediaId: item.id) }
+                        .buttonStyle(LMButtonStyle(kind: .secondary, fullWidth: true))
+                        .disabled(mediaDownload(for: item) != nil || p2pClient.localFileURL(for: item.id) != nil)
+                    Button("Share…") { shareMediaItem(item) }
+                        .buttonStyle(LMButtonStyle(kind: .secondary, fullWidth: true))
+                    Button("Delete from phone") { itemPendingDeletion = item; showDeleteConfirmation = true }
+                        .buttonStyle(LMButtonStyle(kind: .destructive, fullWidth: true))
+                }
+                Spacer(minLength: 0)
+                Text("Streams in chunks, so only the parts you watch are loaded.").font(.lmCaption).foregroundStyle(Theme.textTertiary)
+            }
+            .frame(width: 240)
+            .frame(maxHeight: .infinity, alignment: .top)
+            .lmCard(padding: 18)
+        }
+        .fixedSize(horizontal: false, vertical: true)
     }
 
     // =========================================================================
-    // Scope 3: FaceTime Continuity Camera Detail View
+    // Camera (Figma: Mac · Camera): live view of the phone's camera
     // =========================================================================
     private var cameraDetailView: some View {
-        VStack(spacing: 0) {
-            // Header Bar
-            HStack(spacing: 12) {
-                VStack(alignment: .leading, spacing: 2) {
-                    HStack(spacing: 6) {
-                        Text("FaceTime Continuity Camera")
-                            .font(.title2.bold())
-                        if p2pClient.isCameraSwitching {
-                            ProgressView().controlSize(.small)
-                            Text("Switching...")
-                                .font(.caption2.bold())
-                                .foregroundColor(.cyan)
+        HStack(alignment: .center, spacing: 20) {
+            cameraPreview.frame(maxWidth: .infinity)
+            cameraPanel.frame(width: 280)
+        }
+        .padding(.horizontal, 24).padding(.vertical, 20)
+        .frame(maxHeight: .infinity)
+        .navigationTitle("Camera")
+        .toolbar {
+            ToolbarItemGroup(placement: .primaryAction) {
+                if p2pClient.isCameraStreaming {
+                    StatusChip(tone: .success, label: "Live · \(lensName(p2pClient.currentCameraLens).lowercased()) camera")
+                    Button("Stop camera") { p2pClient.stopCameraStream() }.buttonStyle(.lmSecondary)
+                } else {
+                    Button("Start camera") { p2pClient.startCameraStream(lens: selectedLens) }.buttonStyle(.lmPrimary)
+                }
+            }
+        }
+    }
+
+    private var cameraPreview: some View {
+        ZStack {
+            Color(red: 0.04, green: 0.05, blue: 0.09)
+            if let frame = p2pClient.latestCameraFrame {
+                Image(nsImage: frame).resizable().scaledToFit()
+                    .rotation3DEffect(.degrees(isCameraFlipping ? 180 : 0), axis: (x: 0, y: 1, z: 0))
+                    .animation(.spring(response: 0.45, dampingFraction: 0.7), value: isCameraFlipping)
+            } else {
+                VStack(spacing: 12) {
+                    Image(systemName: "video.slash").font(.system(size: 34, weight: .light)).foregroundStyle(.white.opacity(0.5))
+                    Text(p2pClient.isCameraStreaming ? "Opening your phone’s camera…" : "Camera is off")
+                        .font(.lmTitle).foregroundStyle(.white)
+                    Text("See your phone’s camera here, then share it into a call.")
+                        .font(.lmCallout).foregroundStyle(.white.opacity(0.6))
+                    if !p2pClient.isCameraStreaming {
+                        Button("Start camera") { p2pClient.startCameraStream(lens: selectedLens) }.buttonStyle(.lmPrimary).padding(.top, 4)
+                    }
+                }
+            }
+            VStack {
+                HStack {
+                    if p2pClient.isCameraStreaming {
+                        cameraPill {
+                            Circle().fill(Color.red).frame(width: 8, height: 8)
+                            Text("LIVE · \(lensName(p2pClient.currentCameraLens)) camera")
                         }
                     }
-                    Text("1-Click Front ⇄ Back switch with device orientation tracking matching iPhone")
-                        .font(.caption)
-                        .foregroundColor(.secondary)
+                    Spacer()
+                    if let status = snapshotStatusText {
+                        cameraPill { Image(systemName: "checkmark.circle"); Text(status) }
+                    } else if p2pClient.isCameraStreaming {
+                        cameraPill { Image(systemName: "wifi"); Text("From \(p2pClient.connectedDeviceName ?? "your phone")") }
+                    }
                 }
-
+                .padding(16)
                 Spacer()
+                if let frame = p2pClient.latestCameraFrame {
+                    cameraControls(frame).padding(.bottom, 18)
+                }
+            }
+            if p2pClient.isCameraSwitching {
+                VStack(spacing: 10) {
+                    ProgressView().controlSize(.regular)
+                    Text("Switching to the \(lensName(p2pClient.currentCameraLens).lowercased()) camera…").font(.lmHeadline).foregroundStyle(.white)
+                }
+                .padding(22)
+                .background(RoundedRectangle(cornerRadius: 14, style: .continuous).fill(.black.opacity(0.8)))
+            }
+            if let error = p2pClient.cameraErrorMessage {
+                VStack(spacing: 10) {
+                    Label(error, systemImage: "exclamationmark.triangle.fill").font(.lmHeadline).foregroundStyle(.yellow)
+                    Button("Try again") { p2pClient.switchCameraLens(p2pClient.currentCameraLens) }.buttonStyle(.lmPrimary)
+                }
+                .padding(18)
+                .background(RoundedRectangle(cornerRadius: 12, style: .continuous).fill(.black.opacity(0.85)))
+            }
+        }
+        .aspectRatio(4.0 / 3.0, contentMode: .fit)
+        .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+    }
 
-                // Explicit Lens Segmented Picker
-                Picker("Active Lens", selection: Binding(
+    private func cameraPill<Content: View>(@ViewBuilder _ content: () -> Content) -> some View {
+        HStack(spacing: 6) { content() }
+            .font(.lmCaption).foregroundStyle(.white)
+            .padding(.horizontal, 10).padding(.vertical, 5)
+            .background(Capsule().fill(.black.opacity(0.45)))
+    }
+
+    /// Flip lens, snapshot, floating window (Figma: Camera controls).
+    private func cameraControls(_ frame: NSImage) -> some View {
+        HStack(spacing: 22) {
+            roundCameraButton("arrow.triangle.2.circlepath.camera", help: "Flip camera (front ⇄ back)", busy: p2pClient.isCameraSwitching) {
+                isCameraFlipping.toggle()
+                p2pClient.toggleCameraLens()
+                selectedLens = p2pClient.currentCameraLens
+            }
+            .disabled(p2pClient.isCameraSwitching)
+            Button { takeSnapshot(from: frame) } label: {
+                Circle().fill(.white).frame(width: 48, height: 48)
+                    .overlay(Circle().strokeBorder(.white.opacity(0.4), lineWidth: 4).padding(-6))
+            }
+            .buttonStyle(.plain)
+            .help("Take a snapshot (saved to Downloads)")
+            roundCameraButton("pip.enter", help: "Floating window that stays over FaceTime or Zoom") {
+                FloatingCameraManager.shared.toggle(client: p2pClient)
+            }
+        }
+        .padding(.horizontal, 16).padding(.vertical, 8)
+        .background(Capsule().fill(.black.opacity(0.45)))
+    }
+
+    private func roundCameraButton(_ symbol: String, help: String, busy: Bool = false, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            ZStack {
+                Circle().fill(.white.opacity(0.16)).frame(width: 40, height: 40)
+                if busy { ProgressView().controlSize(.small) } else {
+                    Image(systemName: symbol).font(.system(size: 16, weight: .medium)).foregroundStyle(.white)
+                }
+            }
+        }
+        .buttonStyle(.plain)
+        .help(help)
+    }
+
+    private var cameraPanel: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            VStack(alignment: .leading, spacing: 12) {
+                Text("Lens").font(.lmHeadline).foregroundStyle(Theme.textPrimary)
+                Picker("Lens", selection: Binding(
                     get: { p2pClient.currentCameraLens },
                     set: { newLens in
                         selectedLens = newLens
-                        if p2pClient.isCameraStreaming {
-                            p2pClient.switchCameraLens(newLens)
-                        }
+                        if p2pClient.isCameraStreaming { p2pClient.switchCameraLens(newLens) }
                     }
                 )) {
-                    Text("🤳 Front (FaceTime)").tag("FRONT")
-                    Text("📷 Back (Main 4K)").tag("BACK")
+                    Text("Back").tag("BACK")
+                    Text("Front").tag("FRONT")
                 }
-                .pickerStyle(.segmented)
-                .frame(width: 210)
+                .pickerStyle(.segmented).labelsHidden().frame(width: 150)
                 .disabled(p2pClient.isCameraSwitching)
-
-                Button {
-                    showFaceTimeGuide = true
-                } label: {
-                    Label("FaceTime Help", systemImage: "questionmark.circle")
+                Text("Switching takes a moment while your phone swaps cameras.")
+                    .font(.lmCallout).foregroundStyle(Theme.textSecondary).fixedSize(horizontal: false, vertical: true)
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .lmCard(padding: 18)
+            VStack(alignment: .leading, spacing: 14) {
+                Text("Use it in a call").font(.lmHeadline).foregroundStyle(Theme.textPrimary)
+                callOption(1, kicker: "Recommended", title: "Floating window",
+                           detail: "Stays on top of FaceTime, Zoom or Meet. Share that window in the call.") {
+                    Button("Open floating window") { FloatingCameraManager.shared.toggle(client: p2pClient) }.buttonStyle(.lmSecondary)
                 }
-                .buttonStyle(.bordered)
-                .help("Learn how to use Android camera in Apple FaceTime & Zoom calls")
-
-                if p2pClient.isCameraStreaming {
-                    Button(role: .destructive) {
-                        p2pClient.stopCameraStream()
-                    } label: {
-                        Label("Stop Camera", systemImage: "video.slash.fill")
-                    }
-                    .buttonStyle(.bordered)
-                } else {
-                    Button {
-                        p2pClient.startCameraStream(lens: selectedLens)
-                    } label: {
-                        Label("Start Camera", systemImage: "video.fill")
-                    }
-                    .buttonStyle(.borderedProminent)
+                callOption(2, kicker: nil, title: "Pick it as a webcam",
+                           detail: "Needs OBS Virtual Camera. Then choose “OBS Virtual Camera” in the call’s camera menu.") {
+                    Button { showFaceTimeGuide = true } label: { Text("Setup guide").font(.lmCallout).foregroundStyle(Theme.brand) }
+                        .buttonStyle(.plain)
                 }
             }
-            .padding(.horizontal, 20)
-            .padding(.vertical, 14)
-            .background(Color(NSColor.controlBackgroundColor).opacity(0.6))
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .lmCard(padding: 18)
+        }
+    }
 
-            Divider()
-
-            // Viewport Canvas
-            ZStack {
-                Color.black.opacity(0.96)
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
-
-                if let frame = p2pClient.latestCameraFrame {
-                    Image(nsImage: frame)
-                        .resizable()
-                        .scaledToFit()
-                        .cornerRadius(14)
-                        .padding(12)
-                        .rotation3DEffect(.degrees(isCameraFlipping ? 180 : 0), axis: (x: 0, y: 1, z: 0))
-                        .animation(.spring(response: 0.45, dampingFraction: 0.7), value: isCameraFlipping)
-
-                    // Top Info Overlay
-                    VStack {
-                        HStack {
-                            HStack(spacing: 6) {
-                                Circle().fill(Color.red).frame(width: 8, height: 8)
-                                Text("LIVE • \(p2pClient.currentCameraLens == "FRONT" ? "🤳 FRONT (FACETIME HD)" : "📷 BACK (MAIN 4K)")")
-                                    .font(.caption2.bold())
-                                    .foregroundColor(.white)
-                                Text("• \(p2pClient.cameraRotationDegrees)°")
-                                    .font(.caption2)
-                                    .foregroundColor(.white.opacity(0.8))
-                            }
-                            .padding(.horizontal, 10)
-                            .padding(.vertical, 5)
-                            .background(Color.black.opacity(0.65))
-                            .cornerRadius(8)
-
-                            Spacer()
-
-                            if let status = snapshotStatusText {
-                                Text(status)
-                                    .font(.caption.bold())
-                                    .foregroundColor(.green)
-                                    .padding(.horizontal, 10)
-                                    .padding(.vertical, 5)
-                                    .background(Color.black.opacity(0.75))
-                                    .cornerRadius(8)
-                            }
-                        }
-                        .padding(16)
-
-                        Spacer()
-
-                        // Floating FaceTime Frosted Glass Control Dock
-                        HStack(spacing: 20) {
-                            // Camera Flip Button
-                            Button {
-                                isCameraFlipping.toggle()
-                                p2pClient.toggleCameraLens()
-                                selectedLens = p2pClient.currentCameraLens
-                            } label: {
-                                ZStack {
-                                    Circle()
-                                        .fill(Color.white.opacity(0.2))
-                                        .frame(width: 48, height: 48)
-                                    if p2pClient.isCameraSwitching {
-                                        ProgressView().controlSize(.small)
-                                    } else {
-                                        Image(systemName: "arrow.triangle.2.circlepath.camera.fill")
-                                            .font(.system(size: 20))
-                                            .foregroundColor(.white)
-                                    }
-                                }
-                            }
-                            .buttonStyle(.plain)
-                            .disabled(p2pClient.isCameraSwitching)
-                            .help("Flip Camera Lens (Front ⇄ Back)")
-
-                            // Always-on-Top Floating PiP Window Button
-                            Button {
-                                FloatingCameraManager.shared.toggle(client: p2pClient)
-                            } label: {
-                                ZStack {
-                                    Circle()
-                                        .fill(Color.white.opacity(0.2))
-                                        .frame(width: 48, height: 48)
-                                    Image(systemName: "pip.enter")
-                                        .font(.system(size: 19))
-                                        .foregroundColor(.white)
-                                }
-                            }
-                            .buttonStyle(.plain)
-                            .help("Pop Out Floating Video Window (Over FaceTime / Zoom)")
-
-                            // Shutter Snapshot Button
-                            Button {
-                                takeSnapshot(from: frame)
-                            } label: {
-                                ZStack {
-                                    Circle()
-                                        .fill(Color.white)
-                                        .frame(width: 56, height: 56)
-                                    Circle()
-                                        .stroke(Color.black.opacity(0.25), lineWidth: 2)
-                                        .frame(width: 48, height: 48)
-                                }
-                            }
-                            .buttonStyle(.plain)
-                            .help("Take Snapshot Photo")
-
-                            // Pause / Resume Video
-                            Button {
-                                if p2pClient.isCameraStreaming {
-                                    p2pClient.stopCameraStream()
-                                } else {
-                                    p2pClient.startCameraStream(lens: selectedLens)
-                                }
-                            } label: {
-                                ZStack {
-                                    Circle()
-                                        .fill(p2pClient.isCameraStreaming ? Color.red : Color.green)
-                                        .frame(width: 48, height: 48)
-                                    Image(systemName: p2pClient.isCameraStreaming ? "video.slash.fill" : "video.fill")
-                                        .font(.system(size: 19))
-                                        .foregroundColor(.white)
-                                }
-                            }
-                            .buttonStyle(.plain)
-                            .help(p2pClient.isCameraStreaming ? "Pause Camera Stream" : "Resume Camera Stream")
-                        }
-                        .padding(.horizontal, 24)
-                        .padding(.vertical, 12)
-                        .background(
-                            Capsule()
-                                .fill(Color.black.opacity(0.68))
-                                .overlay(Capsule().stroke(Color.white.opacity(0.22), lineWidth: 1))
-                        )
-                        .padding(.bottom, 24)
-                    }
-
-                    // Switching Lens Overlay
-                    if p2pClient.isCameraSwitching {
-                        VStack(spacing: 12) {
-                            ProgressView()
-                                .controlSize(.regular)
-                            Text("Switching to \(p2pClient.currentCameraLens == "FRONT" ? "Front (FaceTime)" : "Back (Main)") Lens...")
-                                .font(.headline)
-                                .foregroundColor(.white)
-                        }
-                        .padding(24)
-                        .background(Color.black.opacity(0.85))
-                        .cornerRadius(16)
-                    }
-
-                    // Error Message Banner if any
-                    if let err = p2pClient.cameraErrorMessage {
-                        VStack(spacing: 8) {
-                            Label(err, systemImage: "exclamationmark.triangle.fill")
-                                .font(.subheadline.bold())
-                                .foregroundColor(.yellow)
-                            Button("Retry Connection") {
-                                p2pClient.switchCameraLens(p2pClient.currentCameraLens)
-                            }
-                            .buttonStyle(.borderedProminent)
-                        }
-                        .padding(16)
-                        .background(Color.black.opacity(0.88))
-                        .cornerRadius(12)
-                    }
-                } else {
-                    VStack(spacing: 16) {
-                        Image(systemName: "video.slash.fill")
-                            .font(.system(size: 52))
-                            .foregroundColor(.gray)
-                        Text(p2pClient.isCameraStreaming ? "Opening Android Camera..." : "FaceTime Camera Inactive")
-                            .font(.title3.bold())
-                            .foregroundColor(.white)
-                        Text("Use your phone as a high-resolution wireless Mac webcam with Front ⇄ Back switching")
-                            .font(.caption)
-                            .foregroundColor(.gray)
-                            .multilineTextAlignment(.center)
-                            .frame(maxWidth: 340)
-
-                        HStack(spacing: 12) {
-                            Button {
-                                p2pClient.startCameraStream(lens: selectedLens)
-                            } label: {
-                                Label("Start Live Stream", systemImage: "video.fill")
-                            }
-                            .buttonStyle(.borderedProminent)
-                            .controlSize(.large)
-
-                            Button {
-                                showFaceTimeGuide = true
-                            } label: {
-                                Label("FaceTime Setup Guide", systemImage: "questionmark.circle")
-                            }
-                            .buttonStyle(.bordered)
-                            .controlSize(.large)
-                        }
-                    }
-                }
+    private func callOption<Extra: View>(_ number: Int, kicker: String?, title: String, detail: String, @ViewBuilder extra: () -> Extra) -> some View {
+        HStack(alignment: .top, spacing: 10) {
+            Text("\(number)").font(.lmCaption).foregroundStyle(Theme.onBrandSoft)
+                .frame(width: 22, height: 22).background(Circle().fill(Theme.brandSoft))
+            VStack(alignment: .leading, spacing: 4) {
+                if let kicker { SectionLabel(text: kicker, color: Theme.brand) }
+                Text(title).font(.lmHeadline).foregroundStyle(Theme.textPrimary)
+                Text(detail).font(.lmCallout).foregroundStyle(Theme.textSecondary).fixedSize(horizontal: false, vertical: true)
+                extra().padding(.top, 2)
             }
         }
     }
+
+    private func lensName(_ lens: String) -> String { lens == "FRONT" ? "Front" : "Back" }
 
     private func takeSnapshot(from frame: NSImage) {
         if let tiff = frame.tiffRepresentation,
            let bitmap = NSBitmapImageRep(data: tiff),
            let jpeg = bitmap.representation(using: .jpeg, properties: [:]) {
             let downloads = FileManager.default.urls(for: .downloadsDirectory, in: .userDomainMask).first!
-            let url = downloads.appendingPathComponent("UniBridge_Snapshot_\(Int(Date().timeIntervalSince1970)).jpg")
+            let url = downloads.appendingPathComponent("LinkMyMac Snapshot \(Int(Date().timeIntervalSince1970)).jpg")
             try? jpeg.write(to: url)
-            snapshotStatusText = "Snapshot Saved to ~/Downloads!"
+            snapshotStatusText = "Saved to Downloads"
             DispatchQueue.main.asyncAfter(deadline: .now() + 2.5) {
                 snapshotStatusText = nil
             }
@@ -1346,479 +938,312 @@ struct DashboardView: View {
     }
 
     // =========================================================================
-    // Scope 4: Universal Clipboard Detail View
+    // Clipboard (Figma: Mac · Clipboard)
     // =========================================================================
     private var clipboardDetailView: some View {
-        VStack(spacing: 0) {
-            // Header Bar
-            HStack(spacing: 12) {
-                VStack(alignment: .leading, spacing: 2) {
-                    Text("Universal Clipboard")
-                        .font(.title2.bold())
-                    Text("Instant bi-directional copy & paste between macOS and Android")
-                        .font(.caption)
-                        .foregroundColor(.secondary)
-                }
-
-                Spacer()
-
-                HStack(spacing: 6) {
-                    Circle().fill(Color.green).frame(width: 8, height: 8)
-                    Text("SYNC ACTIVE")
-                        .font(.caption2.bold())
-                        .foregroundColor(.green)
-                }
-                .padding(.horizontal, 10)
-                .padding(.vertical, 4)
-                .background(Color.green.opacity(0.12))
-                .cornerRadius(6)
-            }
-            .padding(.horizontal, 20)
-            .padding(.vertical, 14)
-            .background(Color(NSColor.controlBackgroundColor).opacity(0.6))
-
-            Divider()
-
-            ScrollView {
-                VStack(spacing: 16) {
-                    // Info Banner
-                    HStack(spacing: 12) {
-                        Image(systemName: "info.circle.fill")
-                            .font(.title3)
-                            .foregroundColor(.blue)
-                        Text("Any text copied with ⌘C on Mac is automatically sent to your phone. Any text copied on your Android phone is automatically available to paste with ⌘V on Mac.")
-                            .font(.caption)
-                            .foregroundColor(.secondary)
+        let macText = macClipboardText
+        let phoneText = p2pClient.lastSyncedClipboardText.isEmpty ? nil : p2pClient.lastSyncedClipboardText
+        return ScrollView {
+            VStack(alignment: .leading, spacing: 16) {
+                HStack(alignment: .top, spacing: 16) {
+                    clipCard(symbol: "laptopcomputer", who: "This Mac", note: "Copied with ⌘C",
+                             text: macText, placeholder: "Your Mac’s clipboard is empty.") {
+                        Button("Send again") { if let macText { p2pClient.sendClipboardText(macText) } }
+                            .buttonStyle(.lmPrimary).disabled(macText == nil)
+                        Text("Copying here sends it automatically").font(.lmCaption).foregroundStyle(Theme.textTertiary)
                     }
-                    .padding(12)
-                    .background(Color.blue.opacity(0.08))
-                    .cornerRadius(10)
-
-                    // Dual Live Cards: Mac Clipboard & Android Clipboard
-                    HStack(alignment: .top, spacing: 14) {
-                        // Mac Clipboard Card
-                        VStack(alignment: .leading, spacing: 10) {
-                            HStack {
-                                Label("Current Mac Clipboard (⌘C)", systemImage: "laptopcomputer")
-                                    .font(.subheadline.bold())
-                                Spacer()
-                            }
-
-                            Text(NSPasteboard.general.string(forType: .string) ?? "(Clipboard is empty)")
-                                .font(.system(.body, design: .monospaced))
-                                .lineLimit(5)
-                                .frame(maxWidth: .infinity, minHeight: 70, alignment: .topLeading)
-                                .padding(10)
-                                .background(Color(NSColor.controlBackgroundColor))
-                                .cornerRadius(8)
-
-                            Button("Push to Phone Now") {
-                                if let str = NSPasteboard.general.string(forType: .string) {
-                                    p2pClient.sendClipboardText(str)
+                    clipCard(symbol: "iphone", who: p2pClient.connectedDeviceName ?? "Your phone", note: "Last copied there",
+                             text: phoneText, placeholder: "Nothing copied on your phone yet.") {
+                        Button("Copy to Mac") {
+                            guard let phoneText else { return }
+                            NSPasteboard.general.clearContents()
+                            NSPasteboard.general.setString(phoneText, forType: .string)
+                        }
+                        .buttonStyle(.lmSecondary).disabled(phoneText == nil)
+                        Text("Then paste with ⌘V").font(.lmCaption).foregroundStyle(Theme.textTertiary)
+                    }
+                }
+                VStack(alignment: .leading, spacing: 12) {
+                    Text("Send text to your phone’s clipboard").font(.lmHeadline).foregroundStyle(Theme.textPrimary)
+                    TextField("Type or paste text or a link…", text: $customClipboardInput, axis: .vertical)
+                        .textFieldStyle(.plain).font(.lmBody).lineLimit(3...6)
+                        .padding(.horizontal, 12).padding(.vertical, 10)
+                        .frame(maxWidth: .infinity, minHeight: 88, alignment: .topLeading)
+                        .background(RoundedRectangle(cornerRadius: 10, style: .continuous).fill(Theme.surface))
+                        .overlay(RoundedRectangle(cornerRadius: 10, style: .continuous).strokeBorder(Theme.borderStrong))
+                    HStack {
+                        Text("Text only. Send photos and other files from Files.").font(.lmCaption).foregroundStyle(Theme.textTertiary)
+                        Spacer()
+                        Button("Send to phone") {
+                            guard !customClipboardInput.isEmpty else { return }
+                            p2pClient.sendClipboardText(customClipboardInput)
+                            customClipboardInput = ""
+                        }
+                        .buttonStyle(.lmPrimary)
+                        .disabled(customClipboardInput.isEmpty)
+                    }
+                }
+                .lmCard(padding: 18)
+                if !p2pClient.clipboardSyncHistory.isEmpty {
+                    VStack(alignment: .leading, spacing: 10) {
+                        Text("Recent").font(.lmHeadline).foregroundStyle(Theme.textPrimary)
+                        ForEach(p2pClient.clipboardSyncHistory, id: \.self) { item in
+                            HStack(spacing: 10) {
+                                Text(item).font(.lmBody).foregroundStyle(Theme.textSecondary).lineLimit(1)
+                                Spacer(minLength: 8)
+                                Button { NSPasteboard.general.clearContents(); NSPasteboard.general.setString(item, forType: .string) } label: {
+                                    Text("Copy").font(.lmCallout).foregroundStyle(Theme.brand)
                                 }
+                                .buttonStyle(.plain)
                             }
-                            .buttonStyle(.bordered)
-                            .controlSize(.small)
-                        }
-                        .padding(14)
-                        .background(Color.secondary.opacity(0.06))
-                        .cornerRadius(12)
-
-                        // Phone Clipboard Card
-                        VStack(alignment: .leading, spacing: 10) {
-                            HStack {
-                                Label("Last from Android Phone", systemImage: "iphone")
-                                    .font(.subheadline.bold())
-                                Spacer()
-                            }
-
-                            Text(p2pClient.lastSyncedClipboardText.isEmpty ? "(No text received from phone yet)" : p2pClient.lastSyncedClipboardText)
-                                .font(.system(.body, design: .monospaced))
-                                .lineLimit(5)
-                                .frame(maxWidth: .infinity, minHeight: 70, alignment: .topLeading)
-                                .padding(10)
-                                .background(Color(NSColor.controlBackgroundColor))
-                                .cornerRadius(8)
-
-                            Button("Copy to Mac Clipboard (⌘V)") {
-                                guard !p2pClient.lastSyncedClipboardText.isEmpty else { return }
-                                NSPasteboard.general.clearContents()
-                                NSPasteboard.general.setString(p2pClient.lastSyncedClipboardText, forType: .string)
-                            }
-                            .buttonStyle(.bordered)
-                            .controlSize(.small)
-                            .disabled(p2pClient.lastSyncedClipboardText.isEmpty)
-                        }
-                        .padding(14)
-                        .background(Color.secondary.opacity(0.06))
-                        .cornerRadius(12)
-                    }
-
-                    // Custom Push Composer
-                    VStack(alignment: .leading, spacing: 8) {
-                        Text("Send Custom Text to Phone Clipboard")
-                            .font(.subheadline.bold())
-
-                        HStack {
-                            TextField("Type or paste custom text or link to send...", text: $customClipboardInput)
-                                .textFieldStyle(.roundedBorder)
-
-                            Button("Send to Phone") {
-                                guard !customClipboardInput.isEmpty else { return }
-                                p2pClient.sendClipboardText(customClipboardInput)
-                                customClipboardInput = ""
-                            }
-                            .buttonStyle(.borderedProminent)
                         }
                     }
-                    .padding(14)
-                    .background(Color.secondary.opacity(0.06))
-                    .cornerRadius(12)
-
-                    // Recent History
-                    if !p2pClient.clipboardSyncHistory.isEmpty {
-                        VStack(alignment: .leading, spacing: 8) {
-                            Text("Recent Clipboard History (\(p2pClient.clipboardSyncHistory.count))")
-                                .font(.subheadline.bold())
-
-                            VStack(spacing: 6) {
-                                ForEach(p2pClient.clipboardSyncHistory, id: \.self) { item in
-                                    HStack {
-                                        Text(item)
-                                            .font(.caption)
-                                            .lineLimit(1)
-                                        Spacer()
-                                        Button("Copy") {
-                                            NSPasteboard.general.clearContents()
-                                            NSPasteboard.general.setString(item, forType: .string)
-                                        }
-                                        .buttonStyle(.bordered)
-                                        .controlSize(.mini)
-                                    }
-                                    .padding(8)
-                                    .background(Color(NSColor.controlBackgroundColor))
-                                    .cornerRadius(6)
-                                }
-                            }
-                        }
-                        .padding(14)
-                        .background(Color.secondary.opacity(0.06))
-                        .cornerRadius(12)
-                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .lmCard(padding: 18)
                 }
-                .padding(20)
+                HStack(alignment: .top, spacing: 10) {
+                    Image(systemName: "info.circle").font(.system(size: 14, weight: .medium)).foregroundStyle(Theme.warning)
+                    Text("On Android 10 and later, apps can only read the clipboard while they’re open. After copying on your phone, open LinkMyMac to send it here. Mac → phone works anytime.")
+                        .font(.lmCallout).foregroundStyle(Theme.warning).fixedSize(horizontal: false, vertical: true)
+                }
+                .padding(.horizontal, 14).padding(.vertical, 12)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background(RoundedRectangle(cornerRadius: 12, style: .continuous).fill(Theme.warningSoft))
             }
+            .padding(.horizontal, 24).padding(.vertical, 20)
+        }
+        .navigationTitle("Clipboard")
+        .navigationSubtitle("Copy on one, paste on the other")
+        .toolbar {
+            ToolbarItem(placement: .primaryAction) { StatusChip(tone: .success, label: "Syncing text") }
         }
     }
 
+    /// The Mac's clipboard text (sample text in design-preview runs, so checks never show real data).
+    private var macClipboardText: String? {
+        #if DEBUG
+        if MacP2PClient.previewMode != nil { return "Meet at the café on the 2nd floor — table by the window." }
+        #endif
+        return NSPasteboard.general.string(forType: .string).flatMap { $0.isEmpty ? nil : $0 }
+    }
+
+    private func clipCard<Footer: View>(symbol: String, who: String, note: String, text: String?, placeholder: String,
+                                        @ViewBuilder footer: () -> Footer) -> some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack(spacing: 10) {
+                IconTile(symbol: symbol, size: 32, radius: 9, iconSize: 15)
+                VStack(alignment: .leading, spacing: 1) {
+                    Text(who).font(.lmHeadline).foregroundStyle(Theme.textPrimary).lineLimit(1)
+                    Text(note).font(.lmCaption).foregroundStyle(Theme.textTertiary)
+                }
+            }
+            Text(text ?? placeholder)
+                .font(.lmBody).foregroundStyle(text == nil ? Theme.textTertiary : Theme.textPrimary)
+                .lineLimit(3)
+                .frame(maxWidth: .infinity, minHeight: 40, alignment: .topLeading)
+                .padding(.horizontal, 14).padding(.vertical, 12)
+                .background(RoundedRectangle(cornerRadius: 10, style: .continuous).fill(Theme.surfaceMuted))
+                .textSelection(.enabled)
+            HStack(spacing: 10) { footer() }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .lmCard(padding: 18)
+    }
+
     // =========================================================================
-    // Scope 5: QR Code Pairing Detail View
+    // Other ways to connect: QR code, pairing text, address (sheet from Pair a phone)
     // =========================================================================
     private var qrPairingDetailView: some View {
-        VStack(spacing: 0) {
-            // Header Bar
-            HStack(spacing: 12) {
-                VStack(alignment: .leading, spacing: 2) {
-                    Text("Pair Android via QR Code")
-                        .font(.title2.bold())
-                    Text("Connect instantly with Mac webcam scanner, image import, or JSON token")
-                        .font(.caption)
-                        .foregroundColor(.secondary)
+        ScrollView {
+            VStack(alignment: .leading, spacing: 16) {
+                if let peer = p2pClient.discoveredPeers.first, p2pClient.connectedDeviceName == nil {
+                    HStack(spacing: 12) {
+                        IconTile(symbol: "wifi", size: 32, radius: 9, iconSize: 14)
+                        Text("Found \(peer.name) on your Wi‑Fi").font(.lmHeadline).foregroundStyle(Theme.textPrimary)
+                        Spacer()
+                        Button("Connect") { p2pClient.connect(to: peer) }.buttonStyle(.lmPrimary)
+                    }
+                    .lmCard(padding: 14)
                 }
-                Spacer()
-            }
-            .padding(.horizontal, 20)
-            .padding(.vertical, 14)
-            .background(Color(NSColor.controlBackgroundColor).opacity(0.6))
-
-            Divider()
-
-            ScrollView {
-                VStack(spacing: 20) {
-                    // Quick Wireless Connect Card (mDNS Auto-Discovery & Direct Wi-Fi)
-                    VStack(alignment: .leading, spacing: 12) {
-                        HStack(spacing: 10) {
-                            Image(systemName: "wifi")
-                                .font(.title2)
-                                .foregroundColor(.cyan)
-                            VStack(alignment: .leading, spacing: 2) {
-                                Text("Connect Over Local Wi-Fi (No Cable)")
-                                    .font(.headline)
-                                Text("Seamless peer-to-peer connection over your local Wi-Fi network.")
-                                    .font(.caption)
-                                    .foregroundColor(.secondary)
-                            }
-                            Spacer()
-                            Circle()
-                                .fill(p2pClient.connectedDeviceName != nil ? Color.green : Color.cyan)
-                                .frame(width: 10, height: 10)
-                        }
-
-                        if let peer = p2pClient.discoveredPeers.first {
-                            HStack {
-                                Text("Discovered Phone:")
-                                    .font(.subheadline.bold())
-                                Text(peer.name)
-                                    .font(.system(.subheadline, design: .monospaced))
-                                    .foregroundColor(.cyan)
-                            }
-
-                            Button {
-                                p2pClient.connect(to: peer)
-                            } label: {
-                                Label("Connect Wirelessly to \(peer.name)", systemImage: "wifi")
-                            }
-                            .buttonStyle(.borderedProminent)
-                            .controlSize(.large)
-                        } else {
-                            Text("No phone found via Bonjour yet. Check both devices are on the same Wi-Fi, or enter the phone's IP under Manual IP below.")
-                                .font(.caption)
-                                .foregroundColor(.secondary)
-                        }
+                connectOption(symbol: "qrcode.viewfinder", title: "Scan the QR code",
+                              detail: "Hold the QR code in LinkMyMac on your phone up to this Mac’s camera, or pick a screenshot of it.") {
+                    HStack(spacing: 8) {
+                        Button("Open camera scanner") { isShowingQRScanner = true }.buttonStyle(.lmPrimary)
+                        Button("Choose image…") { selectAndScanQRImage() }.buttonStyle(.lmSecondary)
                     }
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .padding(18)
-                    .background(Color.cyan.opacity(0.08))
-                    .overlay(RoundedRectangle(cornerRadius: 12).stroke(Color.cyan.opacity(0.3), lineWidth: 1))
-                    .cornerRadius(12)
-
-                    // Option 1: Live Webcam Scan
-                    VStack(alignment: .leading, spacing: 10) {
-                        Label("Method 1: Scan Phone Screen with Mac Camera", systemImage: "qrcode.viewfinder")
-                            .font(.headline)
-                        Text("Hold your Android phone's UniBridge QR code in front of your Mac's FaceTime HD camera.")
-                            .font(.caption)
-                            .foregroundColor(.secondary)
-
-                        Button {
-                            isShowingQRScanner = true
-                        } label: {
-                            Label("Open Mac Webcam Scanner...", systemImage: "camera.viewfinder")
-                        }
-                        .buttonStyle(.borderedProminent)
-                        .controlSize(.large)
-                    }
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .padding(16)
-                    .background(Color.secondary.opacity(0.06))
-                    .cornerRadius(12)
-
-                    // Option 2: Image Import
-                    VStack(alignment: .leading, spacing: 10) {
-                        Label("Method 2: Import QR Code Screenshot", systemImage: "photo.badge.plus")
-                            .font(.headline)
-                        Text("Select a screenshot or image of the QR code from your Mac disk.")
-                            .font(.caption)
-                            .foregroundColor(.secondary)
-
-                        Button {
-                            selectAndScanQRImage()
-                        } label: {
-                            Label("Choose Image File...", systemImage: "folder")
-                        }
-                        .buttonStyle(.bordered)
-                    }
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .padding(16)
-                    .background(Color.secondary.opacity(0.06))
-                    .cornerRadius(12)
-
-                    // Option 3: Manual JSON Paste
-                    VStack(alignment: .leading, spacing: 10) {
-                        Label("Method 3: Paste QR JSON Token", systemImage: "doc.text")
-                            .font(.headline)
-                        Text("Paste the pairing JSON payload directly from your phone.")
-                            .font(.caption)
-                            .foregroundColor(.secondary)
-
-                        HStack {
-                            TextField("Paste QR Code JSON payload...", text: $qrPasteString)
-                                .textFieldStyle(.roundedBorder)
-
-                            Button("Connect") {
-                                let success = p2pClient.connectViaQRPayload(qrPasteString)
-                                qrStatusMessage = success ? "Connecting via QR payload..." : "Invalid QR Code JSON payload."
-                            }
-                            .buttonStyle(.borderedProminent)
-                            .disabled(qrPasteString.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
-                        }
-
-                        if let status = qrStatusMessage {
-                            Text(status)
-                                .font(.caption.bold())
-                                .foregroundColor(.blue)
-                        }
-                    }
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .padding(16)
-                    .background(Color.secondary.opacity(0.06))
-                    .cornerRadius(12)
-
-                    // Manual IP Fallback
-                    VStack(alignment: .leading, spacing: 10) {
-                        Label("Manual IP & USB Fallback", systemImage: "network")
-                            .font(.headline)
-
-                        HStack(spacing: 12) {
-                            TextField("Host IP", text: $manualHost)
-                                .textFieldStyle(.roundedBorder)
-                                .frame(width: 140)
-                            TextField("Port", text: $manualPort)
-                                .textFieldStyle(.roundedBorder)
-                                .frame(width: 70)
-
-                            Button("Connect Direct") {
-                                let port = UInt16(manualPort) ?? 8765
-                                p2pClient.connectDirect(host: manualHost, port: port)
-                            }
-                            .buttonStyle(.bordered)
-
-                            Button("Connect via USB (127.0.0.1)") {
-                                p2pClient.connectDirect(host: "127.0.0.1", port: 8765)
-                            }
-                            .buttonStyle(.borderedProminent)
-                        }
-                    }
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .padding(16)
-                    .background(Color.secondary.opacity(0.06))
-                    .cornerRadius(12)
                 }
-                .padding(20)
+                connectOption(symbol: "doc.text", title: "Paste the pairing text",
+                              detail: "The text version of the QR code, copied from your phone.") {
+                    HStack(spacing: 8) {
+                        TextField("Paste pairing text", text: $qrPasteString).textFieldStyle(LMTextFieldStyle())
+                        Button("Connect") {
+                            let ok = p2pClient.connectViaQRPayload(qrPasteString)
+                            qrStatusMessage = ok ? "Connecting…" : "That doesn’t look like LinkMyMac pairing text."
+                        }
+                        .buttonStyle(.lmPrimary)
+                        .disabled(qrPasteString.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                    }
+                    if let status = qrStatusMessage {
+                        Text(status).font(.lmCallout).foregroundStyle(Theme.textSecondary)
+                    }
+                }
+                connectOption(symbol: "network", title: "Connect by address",
+                              detail: "Use the phone’s IP address, or a USB cable with “adb forward tcp:8765 tcp:8765”.") {
+                    HStack(spacing: 8) {
+                        TextField("IP address", text: $manualHost).textFieldStyle(LMTextFieldStyle()).frame(width: 150)
+                        TextField("Port", text: $manualPort).textFieldStyle(LMTextFieldStyle()).frame(width: 70)
+                        Button("Connect") { p2pClient.connectDirect(host: manualHost, port: UInt16(manualPort) ?? 8765) }
+                            .buttonStyle(.lmSecondary)
+                        Button("Use USB") { p2pClient.connectDirect(host: "127.0.0.1", port: 8765) }
+                            .buttonStyle(.lmPrimary)
+                    }
+                }
             }
+            .padding(20)
         }
     }
 
+    private func connectOption<Content: View>(symbol: String, title: String, detail: String, @ViewBuilder content: () -> Content) -> some View {
+        HStack(alignment: .top, spacing: 14) {
+            IconTile(symbol: symbol, size: 36, radius: 10, iconSize: 16)
+            VStack(alignment: .leading, spacing: 8) {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(title).font(.lmHeadline).foregroundStyle(Theme.textPrimary)
+                    Text(detail).font(.lmCallout).foregroundStyle(Theme.textSecondary).fixedSize(horizontal: false, vertical: true)
+                }
+                content()
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+        }
+        .lmCard(padding: 16)
+    }
+
     // =========================================================================
-    // File Sharing: drop zone + transfer list (both directions)
+    // Files (Figma: Mac · Files): drop zone + transfers, both directions
     // =========================================================================
     private var filesDetailView: some View {
-        VStack(spacing: 0) {
-            HStack(spacing: 12) {
-                VStack(alignment: .leading, spacing: 2) {
-                    Text("File Sharing")
-                        .font(.title2.bold())
-                    Text("Files you send land in the phone's Download/LinkMyMac folder. Files shared from the phone land in ~/Downloads.")
-                        .font(.caption)
-                        .foregroundColor(.secondary)
-                }
-                Spacer()
-                if p2pClient.transfers.contains(where: { $0.status != .inProgress }) {
-                    Button("Clear Finished") { p2pClient.clearFinishedTransfers() }
-                        .buttonStyle(.bordered)
+        ScrollView {
+            VStack(alignment: .leading, spacing: 18) {
+                filesDropZone
+                if !p2pClient.transfers.isEmpty {
+                    HStack(spacing: 8) {
+                        Text("Transfers").font(.lmTitle).tracking(-0.1).foregroundStyle(Theme.textPrimary)
+                        Text(transferSummary).font(.lmCallout).foregroundStyle(Theme.textTertiary)
+                        Spacer()
+                        if p2pClient.transfers.contains(where: { $0.status != .inProgress }) {
+                            Button { p2pClient.clearFinishedTransfers() } label: {
+                                Text("Clear finished").font(.lmCallout).foregroundStyle(Theme.brand)
+                            }
+                            .buttonStyle(.plain)
+                        }
+                    }
+                    VStack(spacing: 0) {
+                        ForEach(Array(p2pClient.transfers.enumerated()), id: \.element.id) { index, transfer in
+                            transferRow(transfer)
+                            if index < p2pClient.transfers.count - 1 { Hairline() }
+                        }
+                    }
+                    .background(Theme.surface, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+                    .overlay(RoundedRectangle(cornerRadius: 14, style: .continuous).strokeBorder(Theme.borderSubtle))
+                    .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
                 }
             }
-            .padding(.horizontal, 20)
-            .padding(.vertical, 14)
-            .background(Color(NSColor.controlBackgroundColor).opacity(0.6))
-
-            Divider()
-
-            ScrollView {
-                VStack(spacing: 16) {
-                    VStack(spacing: 10) {
-                        Image(systemName: "square.and.arrow.up.on.square")
-                            .font(.system(size: 34))
-                            .foregroundColor(isDropTargeted ? .accentColor : .secondary)
-                        Text(p2pClient.isPaired
-                             ? "Drop files here to send them to \(p2pClient.connectedDeviceName ?? "your phone")"
-                             : "Connect and pair your phone to send files")
-                            .font(.headline)
-                        Text("On the phone: Share → LinkMyMac Companion, or “Send Files to Mac” in the app.")
-                            .font(.caption)
-                            .foregroundColor(.secondary)
-                        Button {
-                            chooseFilesAndSend(to: p2pClient)
-                        } label: {
-                            Label("Choose Files…", systemImage: "folder")
-                        }
-                        .buttonStyle(.borderedProminent)
-                        .disabled(!p2pClient.isPaired)
-                    }
-                    .frame(maxWidth: .infinity)
-                    .padding(28)
-                    .background(
-                        RoundedRectangle(cornerRadius: 14)
-                            .fill(isDropTargeted ? Color.accentColor.opacity(0.12) : Color.secondary.opacity(0.06))
-                    )
-                    .overlay(
-                        RoundedRectangle(cornerRadius: 14)
-                            .strokeBorder(style: StrokeStyle(lineWidth: 2, dash: [7]))
-                            .foregroundColor(isDropTargeted ? .accentColor : Color.secondary.opacity(0.4))
-                    )
-                    .dropDestination(for: URL.self) { urls, _ in
-                        guard p2pClient.isPaired else { return false }
-                        p2pClient.sendFiles(urls)
-                        return true
-                    } isTargeted: { isDropTargeted = $0 }
-
-                    if p2pClient.transfers.isEmpty {
-                        Text("No transfers yet")
-                            .font(.caption)
-                            .foregroundColor(.secondary)
-                            .padding(.top, 8)
-                    } else {
-                        VStack(spacing: 8) {
-                            ForEach(p2pClient.transfers) { transfer in
-                                transferRow(transfer)
-                            }
-                        }
-                    }
-                }
-                .padding(20)
+            .padding(.horizontal, 24).padding(.vertical, 20)
+        }
+        .navigationTitle("Files")
+        .navigationSubtitle("Send files to your phone")
+        .toolbar {
+            ToolbarItem(placement: .primaryAction) {
+                StatusChip(tone: .success, label: "\(p2pClient.connectedDeviceName ?? "Phone") · \(p2pClient.isWirelessConnection ? "Wi‑Fi" : "USB")")
             }
         }
     }
 
-    private func transferRow(_ transfer: FileTransfer) -> some View {
-        HStack(spacing: 12) {
-            Image(systemName: transfer.direction == .toPhone ? "arrow.up.circle.fill" : "arrow.down.circle.fill")
-                .font(.title2)
-                .foregroundColor(transfer.direction == .toPhone ? .blue : .green)
+    private var filesDropZone: some View {
+        VStack(spacing: 10) {
+            Image(systemName: "square.and.arrow.up").font(.system(size: 22, weight: .medium)).foregroundStyle(Theme.brand)
+                .frame(width: 56, height: 56)
+                .background(RoundedRectangle(cornerRadius: 16, style: .continuous).fill(Theme.surface))
+                .shadow(color: .black.opacity(0.08), radius: 6, y: 4)
+            Text("Drop files here to send them to \(p2pClient.connectedDeviceName ?? "your phone")")
+                .font(.lmTitle).tracking(-0.1).foregroundStyle(Theme.textPrimary)
+            Text("They land in Download/LinkMyMac on your phone. Files you share from the phone land in Downloads.")
+                .font(.lmCallout).foregroundStyle(Theme.textSecondary)
+            Button("Choose Files…") { chooseFilesAndSend(to: p2pClient) }.buttonStyle(.lmPrimary).padding(.top, 2)
+        }
+        .frame(maxWidth: .infinity)
+        .frame(height: 210)
+        .background(RoundedRectangle(cornerRadius: 16, style: .continuous).fill(Theme.brandSoft.opacity(isDropTargeted ? 0.95 : 0.55)))
+        .overlay(RoundedRectangle(cornerRadius: 16, style: .continuous)
+            .strokeBorder(Theme.brand, style: StrokeStyle(lineWidth: isDropTargeted ? 2 : 1.5, dash: [6, 5])))
+        .dropDestination(for: URL.self) { urls, _ in
+            guard p2pClient.isPaired else { return false }
+            p2pClient.sendFiles(urls)
+            return true
+        } isTargeted: { isDropTargeted = $0 }
+    }
 
-            VStack(alignment: .leading, spacing: 4) {
-                Text(transfer.name)
-                    .font(.subheadline.bold())
-                    .lineLimit(1)
-                    .truncationMode(.middle)
+    private var transferSummary: String {
+        let sending = p2pClient.transfers.filter { $0.status == .inProgress }.count
+        let done = p2pClient.transfers.filter { $0.status == .done }.count
+        let failed = p2pClient.transfers.count - sending - done
+        return [(sending, "sending"), (done, "done"), (failed, "failed")].filter { $0.0 > 0 }.map { "\($0.0) \($0.1)" }.joined(separator: " · ")
+    }
+
+    /// One transfer (Figma Mac/Transfer row: Sending / Done / Failed).
+    private func transferRow(_ transfer: FileTransfer) -> some View {
+        let toPhone = transfer.direction == .toPhone
+        let colors: (Color, Color) = {
+            switch transfer.status {
+            case .inProgress: return (Theme.brandSoft, Theme.brand)
+            case .done: return (Theme.successSoft, Theme.success)
+            case .failed: return (Theme.dangerSoft, Theme.danger)
+            }
+        }()
+        return HStack(spacing: 14) {
+            IconTile(symbol: toPhone ? "doc" : "arrow.down.doc", size: 40, radius: 10, iconSize: 17,
+                     background: colors.0, foreground: colors.1)
+            VStack(alignment: .leading, spacing: 6) {
+                Text(transfer.name).font(.lmHeadline).foregroundStyle(Theme.textPrimary).lineLimit(1).truncationMode(.middle)
                 switch transfer.status {
                 case .inProgress:
                     if transfer.totalBytes > 0 {
-                        ProgressView(value: Double(min(transfer.bytesTransferred, transfer.totalBytes)),
-                                     total: Double(transfer.totalBytes))
+                        ProgressView(value: Double(min(transfer.bytesTransferred, transfer.totalBytes)), total: Double(transfer.totalBytes))
+                            .tint(Theme.brand)
                         Text("\(formatBytes(transfer.bytesTransferred)) of \(formatBytes(transfer.totalBytes))")
-                            .font(.caption2)
-                            .foregroundColor(.secondary)
+                            .font(.lmCallout).foregroundStyle(Theme.textSecondary)
                     } else {
-                        ProgressView().progressViewStyle(.linear)
+                        ProgressView().progressViewStyle(.linear).tint(Theme.brand)
                     }
                 case .done:
-                    Text(transfer.direction == .toPhone
-                         ? "Saved on phone • \(formatBytes(transfer.totalBytes))"
-                         : "Saved to Downloads • \(formatBytes(transfer.bytesTransferred))")
-                        .font(.caption)
-                        .foregroundColor(.secondary)
+                    Text(toPhone ? "\(formatBytes(transfer.totalBytes)) · Saved to Download/LinkMyMac"
+                                 : "\(formatBytes(transfer.bytesTransferred)) · Saved to Downloads")
+                        .font(.lmCallout).foregroundStyle(Theme.textSecondary)
                 case .failed(let reason):
-                    Text("Failed: \(reason)")
-                        .font(.caption)
-                        .foregroundColor(.red)
+                    Text(reason).font(.lmCallout).foregroundStyle(Theme.danger)
                 }
             }
-
-            Spacer()
-
-            if let url = transfer.localURL {
-                Button { NSWorkspace.shared.open(url) } label: { Image(systemName: "eye") }
-                    .buttonStyle(.borderless)
-                    .help("Open")
-                Button { NSWorkspace.shared.activateFileViewerSelecting([url]) } label: { Image(systemName: "folder") }
-                    .buttonStyle(.borderless)
-                    .help("Show in Finder")
+            .frame(maxWidth: .infinity, alignment: .leading)
+            switch transfer.status {
+            case .inProgress:
+                if transfer.totalBytes > 0 {
+                    Text("\(Int(Double(transfer.bytesTransferred) / Double(transfer.totalBytes) * 100))%")
+                        .font(.lmCallout).foregroundStyle(Theme.textSecondary).monospacedDigit()
+                }
+            case .done:
+                if let url = transfer.localURL {
+                    IconButton(symbol: "eye", help: "Open") { NSWorkspace.shared.open(url) }
+                    IconButton(symbol: "folder", help: "Show in Finder") { NSWorkspace.shared.activateFileViewerSelecting([url]) }
+                } else {
+                    Image(systemName: "checkmark").font(.system(size: 14, weight: .semibold)).foregroundStyle(Theme.success)
+                }
+            case .failed:
+                if toPhone, let url = transfer.localURL {
+                    Button("Retry") { p2pClient.sendFiles([url]) }.buttonStyle(.lmSecondary)
+                }
             }
         }
-        .padding(12)
-        .background(Color.secondary.opacity(0.06))
-        .cornerRadius(10)
+        .padding(.horizontal, 16).padding(.vertical, 12)
     }
 
     /// Letters and digits only, so "abc 123" and "ABC-123" both work.
@@ -1836,20 +1261,6 @@ struct DashboardView: View {
     // Helpers
     // =========================================================================
 
-    private func tabColor(for tab: DashboardTab) -> Color {
-        switch tab {
-        case .notifications: return .red
-        case .photos: return .blue
-        case .videos: return .indigo
-        case .files: return .teal
-        case .messages: return .mint
-        case .calls: return .cyan
-        case .phoneScreen: return .pink
-        case .camera: return .green
-        case .clipboard: return .purple
-        case .qrPairing: return .orange
-        }
-    }
 
     private func batteryIcon(for level: Int) -> String {
         switch level {

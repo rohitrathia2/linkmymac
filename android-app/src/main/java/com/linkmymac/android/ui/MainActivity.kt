@@ -27,6 +27,11 @@ import android.view.Gravity
 import android.view.View
 import android.view.WindowManager
 import android.widget.Button
+import android.text.style.ForegroundColorSpan
+import android.text.Spanned
+import android.text.SpannableStringBuilder
+import android.widget.FrameLayout
+import android.widget.Switch
 import android.widget.EditText
 import android.widget.ImageView
 import android.widget.LinearLayout
@@ -48,9 +53,9 @@ import com.linkmymac.android.service.P2PDaemonService
  * MainActivity: Companion Device Pairing & Status UI Entry Point
  * =============================================================================
  * WHAT IT DOES:
- *   Serves as the high-fidelity Android user interface for UniBridge.
+ *   Serves as the high-fidelity Android user interface for LinkMyMac.
  *   Provides:
- *     1. Hero Status Header with official glowing UniBridge branding, live daemon
+ *     1. Hero Status Header with official glowing LinkMyMac branding, live daemon
  *        connection telemetry, Wi-Fi IP and USB ADB forward badges.
  *     2. Interactive Permissions Hub with real-time status badges (Notification
  *        Access, Scoped Storage Gallery Access, Live Continuity Camera).
@@ -79,17 +84,19 @@ class MainActivity : Activity() {
     private lateinit var qrCodeImageView: ImageView
     private lateinit var pairingCodeText: TextView
     private lateinit var pairingStatusText: TextView
+    private lateinit var pairingSection: LinearLayout
+    private lateinit var connectedSection: LinearLayout
+    private lateinit var connectedTitle: TextView
+    private lateinit var connectedDetail: TextView
+    private lateinit var notifSwitch: Switch
+    private lateinit var storageSwitch: Switch
+    private lateinit var cameraSwitch: Switch
+    private lateinit var phoneSwitch: Switch
+    private lateinit var controlSwitch: Switch
     private var lastShownCode = ""
     private val pickFilesRequest = 201
 
     // Permission status badge references for dynamic onResume refresh
-    private lateinit var notifStatusPill: TextView
-    private lateinit var notifActionButton: Button
-    private lateinit var storageStatusPill: TextView
-    private lateinit var storageActionButton: Button
-    private lateinit var cameraStatusPill: TextView
-    private lateinit var phoneStatusPill: TextView
-    private lateinit var phoneActionButton: Button
     private val phonePermissions = arrayOf(
         android.Manifest.permission.READ_SMS,
         android.Manifest.permission.SEND_SMS,
@@ -99,7 +106,6 @@ class MainActivity : Activity() {
         android.Manifest.permission.ANSWER_PHONE_CALLS,
         android.Manifest.permission.CALL_PHONE
     )
-    private lateinit var cameraActionButton: Button
     private lateinit var networkStatusBadge: TextView
     private lateinit var ipPillText: TextView
 
@@ -163,7 +169,7 @@ class MainActivity : Activity() {
             val bmp = Bitmap.createBitmap(width, height, Bitmap.Config.RGB_565)
             for (x in 0 until width) {
                 for (y in 0 until height) {
-                    bmp.setPixel(x, y, if (matrix[x, y]) Color.parseColor("#0F172A") else Color.WHITE)
+                    bmp.setPixel(x, y, if (matrix[x, y]) Color.parseColor("#0B0D17") else Color.WHITE)
                 }
             }
             bmp
@@ -230,7 +236,7 @@ class MainActivity : Activity() {
         val message = if (P2PDaemonService.sendFilesToMac(uris)) {
             if (uris.size == 1) "Sending to your Mac…" else "Sending ${uris.size} files to your Mac…"
         } else {
-            "No paired Mac connected. Open UniBridge on your Mac first."
+            "No paired Mac connected. Open LinkMyMac on your Mac first."
         }
         Toast.makeText(this, message, Toast.LENGTH_LONG).show()
     }
@@ -301,60 +307,12 @@ class MainActivity : Activity() {
      * -------------------------------------------------------------------------
      */
     private fun updateAllPermissionStates() {
-        // 1. Notification Mirroring
-        val hasNotif = isNotificationAccessGranted()
-        if (hasNotif) {
-            notifStatusPill.text = "✓ ACTIVE"
-            notifStatusPill.background = createPillDrawable("#052E16", "#10B981")
-            notifStatusPill.setTextColor(Color.parseColor("#34D399"))
-            notifActionButton.visibility = View.GONE
-        } else {
-            notifStatusPill.text = "ACTION REQUIRED"
-            notifStatusPill.background = createPillDrawable("#451A03", "#F59E0B")
-            notifStatusPill.setTextColor(Color.parseColor("#FBBF24"))
-            notifActionButton.visibility = View.VISIBLE
-        }
-
-        // 2. Storage / Gallery
-        val hasStorage = isStorageAccessGranted()
-        if (hasStorage) {
-            storageStatusPill.text = "✓ ACCESSIBLE"
-            storageStatusPill.background = createPillDrawable("#052E16", "#10B981")
-            storageStatusPill.setTextColor(Color.parseColor("#34D399"))
-            storageActionButton.visibility = View.GONE
-        } else {
-            storageStatusPill.text = "ACTION REQUIRED"
-            storageStatusPill.background = createPillDrawable("#451A03", "#F59E0B")
-            storageStatusPill.setTextColor(Color.parseColor("#FBBF24"))
-            storageActionButton.visibility = View.VISIBLE
-        }
-
-        // 3. Continuity Camera
-        val hasCamera = isCameraAccessGranted()
-        if (hasCamera) {
-            cameraStatusPill.text = "✓ FACETIME READY"
-            cameraStatusPill.background = createPillDrawable("#052E16", "#10B981")
-            cameraStatusPill.setTextColor(Color.parseColor("#34D399"))
-            cameraActionButton.visibility = View.GONE
-        } else {
-            cameraStatusPill.text = "ACTION REQUIRED"
-            cameraStatusPill.background = createPillDrawable("#451A03", "#F59E0B")
-            cameraStatusPill.setTextColor(Color.parseColor("#FBBF24"))
-            cameraActionButton.visibility = View.VISIBLE
-        }
-
-        // 4. Messages, calls & Mac control
-        val hasPhone = phonePermissions.all { checkSelfPermission(it) == PackageManager.PERMISSION_GRANTED }
-        val hasControl = ControlService.instance != null
-        phoneStatusPill.text = when {
-            hasPhone && hasControl -> "✓ READY"
-            hasPhone -> "CONTROL OFF"
-            else -> "ACTION REQUIRED"
-        }
-        val ready = hasPhone && hasControl
-        phoneStatusPill.background = createPillDrawable(if (ready) "#052E16" else "#451A03", if (ready) "#10B981" else "#F59E0B")
-        phoneStatusPill.setTextColor(Color.parseColor(if (ready) "#34D399" else "#FBBF24"))
-        phoneActionButton.visibility = if (hasPhone) View.GONE else View.VISIBLE
+        if (!::notifSwitch.isInitialized) return
+        notifSwitch.isChecked = isNotificationAccessGranted()
+        storageSwitch.isChecked = isStorageAccessGranted()
+        cameraSwitch.isChecked = isCameraAccessGranted()
+        phoneSwitch.isChecked = phonePermissions.all { checkSelfPermission(it) == PackageManager.PERMISSION_GRANTED }
+        controlSwitch.isChecked = ControlService.instance != null
     }
 
     override fun onRequestPermissionsResult(requestCode: Int, permissions: Array<out String>, grantResults: IntArray) {
@@ -378,15 +336,15 @@ class MainActivity : Activity() {
 
         if (isStreaming) {
             camStreamStatusBadge.text = "● LIVE STREAMING"
-            camStreamStatusBadge.background = createPillDrawable("#052E16", "#10B981")
-            camStreamStatusBadge.setTextColor(Color.parseColor("#34D399"))
+            camStreamStatusBadge.background = createPillDrawable("#123222", "#3DDC84")
+            camStreamStatusBadge.setTextColor(Color.parseColor("#3DDC84"))
             if (::btnToggleStream.isInitialized) {
                 btnToggleStream.text = "⏹ Stop Live Stream"
             }
         } else {
             camStreamStatusBadge.text = "○ STANDBY"
-            camStreamStatusBadge.background = createPillDrawable("#1E293B", "#64748B")
-            camStreamStatusBadge.setTextColor(Color.parseColor("#94A3B8"))
+            camStreamStatusBadge.background = createPillDrawable("#20243A", "#6F7593")
+            camStreamStatusBadge.setTextColor(Color.parseColor("#A6ACC4"))
             if (::btnToggleStream.isInitialized) {
                 btnToggleStream.text = "▶ Start Live Stream"
             }
@@ -395,16 +353,16 @@ class MainActivity : Activity() {
         val isFront = lens.equals("FRONT", ignoreCase = true)
         if (isSwitching) {
             camLensBadge.text = "🔄 SWITCHING..."
-            camLensBadge.background = createPillDrawable("#451A03", "#F59E0B")
-            camLensBadge.setTextColor(Color.parseColor("#FBBF24"))
+            camLensBadge.background = createPillDrawable("#3A2B0C", "#F6B84B")
+            camLensBadge.setTextColor(Color.parseColor("#F6B84B"))
         } else if (isFront) {
             camLensBadge.text = "🤳 FRONT (FACETIME HD)"
-            camLensBadge.background = createPillDrawable("#1E1B4B", "#6366F1")
-            camLensBadge.setTextColor(Color.parseColor("#A5B4FC"))
+            camLensBadge.background = createPillDrawable("#232859", "#8F98FF")
+            camLensBadge.setTextColor(Color.parseColor("#C3C8FF"))
         } else {
             camLensBadge.text = "📷 BACK (MAIN 4K)"
-            camLensBadge.background = createPillDrawable("#083344", "#06B6D4")
-            camLensBadge.setTextColor(Color.parseColor("#67E8F9"))
+            camLensBadge.background = createPillDrawable("#232859", "#8F98FF")
+            camLensBadge.setTextColor(Color.parseColor("#C3C8FF"))
         }
     }
 
@@ -435,11 +393,11 @@ class MainActivity : Activity() {
         if (latest.isNotBlank()) {
             lastObservedClip = latest
             currentClipDisplay.text = latest
-            currentClipDisplay.setTextColor(Color.parseColor("#F8FAFC"))
+            currentClipDisplay.setTextColor(Color.parseColor("#F3F4FA"))
         } else {
             lastObservedClip = ""
             currentClipDisplay.text = "No clipboard items synced yet. Copy text on Mac or type below."
-            currentClipDisplay.setTextColor(Color.parseColor("#64748B"))
+            currentClipDisplay.setTextColor(Color.parseColor("#6F7593"))
         }
 
         if (::historyItemsLayout.isInitialized) {
@@ -448,7 +406,7 @@ class MainActivity : Activity() {
                 val emptyTv = TextView(this).apply {
                     text = "History appears here as you copy on phone or Mac."
                     textSize = 11f
-                    setTextColor(Color.parseColor("#64748B"))
+                    setTextColor(Color.parseColor("#6F7593"))
                     setPadding(0, dp(4), 0, dp(4))
                 }
                 historyItemsLayout.addView(emptyTv)
@@ -459,9 +417,9 @@ class MainActivity : Activity() {
                         gravity = Gravity.CENTER_VERTICAL
                         setPadding(dp(10), dp(8), dp(10), dp(8))
                         background = GradientDrawable().apply {
-                            setColor(Color.parseColor("#0F172A"))
+                            setColor(Color.parseColor("#0B0D17"))
                             cornerRadius = dp(8f)
-                            setStroke(dp(1), Color.parseColor("#1E293B"))
+                            setStroke(dp(1), Color.parseColor("#20243A"))
                         }
                         layoutParams = LinearLayout.LayoutParams(
                             LinearLayout.LayoutParams.MATCH_PARENT,
@@ -474,7 +432,7 @@ class MainActivity : Activity() {
                     val previewText = TextView(this).apply {
                         text = if (item.length > 50) item.take(50) + "…" else item
                         textSize = 12f
-                        setTextColor(Color.parseColor("#E2E8F0"))
+                        setTextColor(Color.parseColor("#F3F4FA"))
                         typeface = Typeface.MONOSPACE
                         layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
                     }
@@ -482,11 +440,11 @@ class MainActivity : Activity() {
 
                     val btnCopyItem = createModernButton(
                         text = "Copy",
-                        bgColor = "#1E293B",
-                        textColor = "#38BDF8"
+                        bgColor = "#20243A",
+                        textColor = "#8F98FF"
                     ) {
                         val cm = getSystemService(CLIPBOARD_SERVICE) as ClipboardManager
-                        cm.setPrimaryClip(ClipData.newPlainText("UniBridge", item))
+                        cm.setPrimaryClip(ClipData.newPlainText("LinkMyMac", item))
                         Toast.makeText(this@MainActivity, "Copied to clipboard!", Toast.LENGTH_SHORT).show()
                     }.apply {
                         setPadding(dp(10), dp(4), dp(10), dp(4))
@@ -515,21 +473,18 @@ class MainActivity : Activity() {
         val wifiIp = getLocalWifiIpAddress()
         if (wifiIp != lastKnownIp) {
             lastKnownIp = wifiIp
-            ipPillText.text = "IP: $wifiIp • PORT ${P2PDaemonService.DEFAULT_PORT}"
+            ipPillText.text = "Visible on Wi‑Fi as ${Build.MODEL} · $wifiIp"
             if (::qrPayloadText.isInitialized && ::qrCodeImageView.isInitialized) {
                 updateQrDisplay()
             }
         }
 
-        if (clientCount > 0) {
-            networkStatusBadge.text = "● MAC CONNECTED ($clientCount active)"
-            networkStatusBadge.background = createPillDrawable("#052E16", "#10B981")
-            networkStatusBadge.setTextColor(Color.parseColor("#34D399"))
-        } else {
-            networkStatusBadge.text = "○ STANDBY • Pairing code ${formattedPairingCode()}"
-            networkStatusBadge.background = createPillDrawable("#1E293B", "#64748B")
-            networkStatusBadge.setTextColor(Color.parseColor("#94A3B8"))
-        }
+        val connected = clientCount > 0
+        setChip(networkStatusBadge, if (connected) "Connected" else "Listening", if (connected) "success" else "neutral")
+        pairingSection.visibility = if (connected) View.GONE else View.VISIBLE
+        connectedSection.visibility = if (connected) View.VISIBLE else View.GONE
+        connectedTitle.text = "Connected to ${P2PDaemonService.connectedMacName ?: "your Mac"}"
+        connectedDetail.text = if (clientCount > 1) "$clientCount Macs connected" else "Paired and connected"
     }
 
     /**
@@ -689,10 +644,10 @@ class MainActivity : Activity() {
             livePlaybackElapsed = 0.0
             lastPlaybackUpdateTime = 0L
             mediaStatusBadge.text = "○ STANDBY"
-            mediaStatusBadge.background = createPillDrawable("#1E293B", "#64748B")
-            mediaStatusBadge.setTextColor(Color.parseColor("#94A3B8"))
+            mediaStatusBadge.background = createPillDrawable("#20243A", "#6F7593")
+            mediaStatusBadge.setTextColor(Color.parseColor("#A6ACC4"))
             mediaTitleText.text = "No active media playing on Mac"
-            mediaTitleText.setTextColor(Color.parseColor("#94A3B8"))
+            mediaTitleText.setTextColor(Color.parseColor("#A6ACC4"))
             mediaSubtitleText.text = "Start audio or video on Mac (Spotify, YouTube, Apple Music) to control it here and in your notifications."
             btnMediaPlayPause.text = "▶ Play"
             btnMediaPlayPause.isEnabled = false
@@ -726,13 +681,13 @@ class MainActivity : Activity() {
 
             if (data.isPlaying) {
                 mediaStatusBadge.text = "● PLAYING ON MAC"
-                mediaStatusBadge.background = createPillDrawable("#052E16", "#10B981")
-                mediaStatusBadge.setTextColor(Color.parseColor("#34D399"))
+                mediaStatusBadge.background = createPillDrawable("#123222", "#3DDC84")
+                mediaStatusBadge.setTextColor(Color.parseColor("#3DDC84"))
                 btnMediaPlayPause.text = "⏸ Pause"
             } else {
                 mediaStatusBadge.text = "⏸ PAUSED ON MAC"
-                mediaStatusBadge.background = createPillDrawable("#451A03", "#F59E0B")
-                mediaStatusBadge.setTextColor(Color.parseColor("#FBBF24"))
+                mediaStatusBadge.background = createPillDrawable("#3A2B0C", "#F6B84B")
+                mediaStatusBadge.setTextColor(Color.parseColor("#F6B84B"))
                 btnMediaPlayPause.text = "▶ Resume"
             }
         }
@@ -748,7 +703,7 @@ class MainActivity : Activity() {
      *   1. Enables FLAG_KEEP_SCREEN_ON to prevent device sleeping during sessions.
      *   2. Dispatches startForegroundService(P2PDaemonService).
      *   3. Programmatically constructs a dark Material 3 dashboard layout with
-     *      Glassmorphic cards, glowing UniBridge logo, status pills, and QR card.
+     *      Glassmorphic cards, glowing LinkMyMac logo, status pills, and QR card.
      * WHY IT DOES IT: Provides a unified, ultra-responsive native UI on Android.
      * -------------------------------------------------------------------------
      */
@@ -761,8 +716,8 @@ class MainActivity : Activity() {
             return
         }
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
-        window.statusBarColor = Color.parseColor("#0B0E14")
-        window.navigationBarColor = Color.parseColor("#0B0E14")
+        window.statusBarColor = Color.parseColor("#0B0D17")
+        window.navigationBarColor = Color.parseColor("#0B0D17")
 
         /**
          * WHAT IT DOES: Allows MainActivity to display above keyguard lockscreen and keeps display awake.
@@ -792,184 +747,198 @@ class MainActivity : Activity() {
 
         // Root Scrollable Canvas
         val scroll = ScrollView(this).apply {
-            setBackgroundColor(Color.parseColor("#0B0E14"))
+            setBackgroundColor(Color.parseColor("#0B0D17"))
             isFillViewport = true
+        }
+        // Android 15+ draws apps edge to edge: keep content clear of the status and gesture bars.
+        scroll.setOnApplyWindowInsetsListener { view, insets ->
+            @Suppress("DEPRECATION") val bars = insets.systemWindowInsets // API 29+: status + navigation bars
+            view.setPadding(bars.left, bars.top, bars.right, bars.bottom)
+            insets
         }
 
         val root = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            setPadding(dp(20), dp(36), dp(20), dp(40))
+            setPadding(dp(16), dp(24), dp(16), dp(32))
         }
 
         // =====================================================================
-        // Scope 1: Hero Header with Glowing UniBridge Icon & Status
+        // Top app bar, then the pairing or connected card
+        // (Figma: Android · Pairing code / Android · Connected)
         // =====================================================================
-        // WHAT IT DOES: Renders app logo, device name, and listening network status.
-        // HOW IT DOES IT: Combines ImageView, bold titles, and glowing status pills.
-        // WHY IT DOES IT: Instantly communicates app identity and connection readiness.
-        // =====================================================================
-        val heroLayout = LinearLayout(this).apply {
+        val appBar = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
-            setPadding(0, 0, 0, dp(24))
+            setPadding(dp(4), 0, 0, dp(16))
         }
-
-        val logoSize = dp(68)
-        val logoView = ImageView(this).apply {
-            setImageResource(R.drawable.app_logo)
-            layoutParams = LinearLayout.LayoutParams(logoSize, logoSize).apply {
-                marginEnd = dp(16)
-            }
-            background = GradientDrawable().apply {
-                cornerRadius = dp(18f)
-                setStroke(dp(1), Color.parseColor("#38BDF8"))
-            }
-            clipToOutline = true
-        }
-        heroLayout.addView(logoView)
-
-        val headerTextCol = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-        }
-
-        val title = TextView(this).apply {
-            text = "UniBridge"
-            textSize = 24f
-            setTextColor(Color.WHITE)
-            typeface = Typeface.DEFAULT_BOLD
-        }
-        headerTextCol.addView(title)
-
-        val subtitle = TextView(this).apply {
-            text = "Apple Continuity for Android ⇄ Mac"
-            textSize = 13f
-            setTextColor(Color.parseColor("#94A3B8"))
-            setPadding(0, dp(2), 0, dp(6))
-        }
-        headerTextCol.addView(subtitle)
-
-        val wifiIp = getLocalWifiIpAddress()
-        val connectionRow = LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL
-        }
-
-        networkStatusBadge = TextView(this).apply {
-            text = "● DAEMON LISTENING"
-            textSize = 10f
-            typeface = Typeface.DEFAULT_BOLD
-            setPadding(dp(8), dp(3), dp(8), dp(3))
-            background = createPillDrawable("#052E16", "#10B981")
-            setTextColor(Color.parseColor("#34D399"))
-            layoutParams = LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.WRAP_CONTENT,
-                LinearLayout.LayoutParams.WRAP_CONTENT
-            ).apply { marginEnd = dp(8) }
-        }
-        connectionRow.addView(networkStatusBadge)
-
-        ipPillText = TextView(this).apply {
-            text = "PORT ${P2PDaemonService.DEFAULT_PORT} • USB / Wi-Fi"
-            textSize = 10f
-            typeface = Typeface.DEFAULT_BOLD
-            setPadding(dp(8), dp(3), dp(8), dp(3))
-            background = createPillDrawable("#1E293B", "#475569")
-            setTextColor(Color.parseColor("#CBD5E1"))
-        }
-        connectionRow.addView(ipPillText)
-
-        headerTextCol.addView(connectionRow)
-        heroLayout.addView(headerTextCol)
-        root.addView(heroLayout)
-
-        // =====================================================================
-        // Scope 2: Permissions & Services Control Hub
-        // =====================================================================
-        // WHAT IT DOES: Presents 3 interactive permission cards with live status.
-        // HOW IT DOES IT: Queries system settings and manifests, offering 1-click
-        //                 intents to Android settings with reactive badge feedback.
-        // WHY IT DOES IT: Bridges sandboxed features (notifications, photos, camera).
-        // =====================================================================
-        val permSectionHeader = createSectionHeader("SYSTEM PERMISSIONS & SERVICES")
-        root.addView(permSectionHeader)
-
-        // Card 1: Notification Mirroring
-        val notifCard = createFeatureCard(
-            iconRes = "🔔",
-            titleText = "iPhone Notification Mirroring",
-            descriptionText = "Mirrors incoming alerts & quick replies to macOS desktop banners and Notification Center.",
-            statusPillInit = { notifStatusPill = it },
-            actionButtonInit = {
-                notifActionButton = it
-                it.text = "Grant Notification Access"
-                it.setOnClickListener {
-                    startActivity(Intent(Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS))
-                }
-            }
-        )
-        root.addView(notifCard)
-
-        // Card 2: Gallery & Scoped Media
-        val storageCard = createFeatureCard(
-            iconRes = "🖼",
-            titleText = "AirDrop & Photo Gallery Sync",
-            descriptionText = "Allows Mac to browse Android camera roll, download full-res originals, and permanent delete.",
-            statusPillInit = { storageStatusPill = it },
-            actionButtonInit = {
-                storageActionButton = it
-                it.text = "Grant Storage / Media Access"
-                it.setOnClickListener {
-                    if (Build.VERSION.SDK_INT >= 30) {
-                        try {
-                            startActivity(Intent(Settings.ACTION_MANAGE_ALL_FILES_ACCESS_PERMISSION))
-                        } catch (_: Exception) {
-                            requestPermissions(arrayOf(android.Manifest.permission.READ_EXTERNAL_STORAGE), 101)
-                        }
-                    } else {
-                        requestPermissions(arrayOf(android.Manifest.permission.READ_EXTERNAL_STORAGE), 101)
-                    }
-                }
-            }
-        )
-        root.addView(storageCard)
-
-        // Card 3: Live Continuity Camera
-        val cameraCard = createFeatureCard(
-            iconRes = "📹",
-            titleText = "FaceTime Continuity Camera",
-            descriptionText = "Enables Front ⇄ Back camera streaming to Mac with 1-click lens flip and device tilt orientation.",
-            statusPillInit = { cameraStatusPill = it },
-            actionButtonInit = {
-                cameraActionButton = it
-                it.text = "Grant Camera Hardware Access"
-                it.setOnClickListener {
-                    requestPermissions(arrayOf(android.Manifest.permission.CAMERA), 102)
-                }
-            }
-        )
-        root.addView(cameraCard)
-
-        // Card 4: Messages, calls and Mac mouse/keyboard control
-        val phoneCard = createFeatureCard(
-            iconRes = "💬",
-            titleText = "Messages, Calls & Mac Control",
-            descriptionText = "Read and send SMS, answer calls and see recent calls from your Mac. " +
-                "Turn on \"LinkMyMac Mac Control\" in Accessibility to use your Mac's mouse and keyboard on this phone.",
-            statusPillInit = { phoneStatusPill = it },
-            actionButtonInit = {
-                phoneActionButton = it
-                it.text = "Allow Messages & Calls"
-                it.setOnClickListener { requestPermissions(phonePermissions, 103) }
-            }
-        )
-        phoneCard.addView(createModernButton("Turn On Mac Control (Accessibility)", "#1E293B", "#F8FAFC") {
-            startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS))
-        }.apply {
-            layoutParams = LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.MATCH_PARENT,
-                LinearLayout.LayoutParams.WRAP_CONTENT
-            ).apply { topMargin = dp(8) }
+        appBar.addView(brandMark(32))
+        appBar.addView(lmText("LinkMyMac", 18f, LM.TEXT, medium = true).apply {
+            layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f).apply { marginStart = dp(12) }
         })
-        root.addView(phoneCard)
+        networkStatusBadge = lmChip()
+        appBar.addView(networkStatusBadge)
+        root.addView(appBar)
+
+        // Pairing: the code to type on the Mac, the QR alternative, what the Mac sees.
+        pairingSection = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        val pairHero = lmCard(28f, 24, 24).apply { gravity = Gravity.CENTER_HORIZONTAL }
+        pairHero.addView(lmChip().also { setChip(it, "Ready to pair", "brand") }, wrap())
+        pairHero.addView(lmText("Pair with your Mac", 24f, LM.TEXT, medium = true).apply {
+            gravity = Gravity.CENTER
+            setPadding(0, dp(16), 0, 0)
+        })
+        pairHero.addView(lmText("Open LinkMyMac on your Mac, pick this phone, then type:", 14f, LM.TEXT2).apply {
+            gravity = Gravity.CENTER
+            setPadding(dp(8), dp(8), dp(8), 0)
+            setLineSpacing(dp(2f), 1f)
+        })
+        pairingCodeText = TextView(this).apply {
+            textSize = 36f
+            typeface = Typeface.MONOSPACE
+            letterSpacing = 0.12f
+            setTextColor(c(LM.TEXT))
+            gravity = Gravity.CENTER
+            background = roundRect(LM.SURFACE_MUTED, 20f, LM.BORDER)
+            setPadding(dp(22), dp(12), dp(22), dp(12))
+        }
+        pairHero.addView(pairingCodeText, wrap(top = 16))
+        pairHero.addView(lmTextButton("New code", R.drawable.ic_lm_refresh, LM.BRAND) {
+            cryptoManager.rotateEphemeralNonce()
+            PairingManager.rotateCode()
+            updatePairingUi()
+            Toast.makeText(this@MainActivity, "New pairing code", Toast.LENGTH_SHORT).show()
+        }, wrap(top = 8))
+        pairingStatusText = lmText("", 12f, LM.TEXT3).apply { gravity = Gravity.CENTER }
+        pairHero.addView(pairingStatusText, wrap())
+        pairingSection.addView(pairHero, matchWrap())
+
+        val qrCard = lmCard(24f, 16, 16).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+        }
+        val qrTile = FrameLayout(this).apply {
+            background = roundRect("#FFFFFF", 12f)
+            setPadding(dp(6), dp(6), dp(6), dp(6))
+        }
+        qrCodeImageView = ImageView(this)
+        qrTile.addView(qrCodeImageView, FrameLayout.LayoutParams(FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT))
+        qrCard.addView(qrTile, LinearLayout.LayoutParams(dp(84), dp(84)))
+        val qrTexts = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        qrTexts.addView(lmText("Or scan it with your Mac’s camera", 16f, LM.TEXT, medium = true))
+        qrTexts.addView(lmText("For when your Mac can’t find this phone", 14f, LM.TEXT2).apply { setPadding(0, dp(2), 0, 0) })
+        qrTexts.addView(lmTextButton("Copy pairing text", null, LM.BRAND) {
+            val cm = getSystemService(CLIPBOARD_SERVICE) as android.content.ClipboardManager
+            cm.setPrimaryClip(android.content.ClipData.newPlainText("LinkMyMac pairing", qrPayloadText.text))
+            Toast.makeText(this@MainActivity, "Pairing text copied", Toast.LENGTH_SHORT).show()
+        }.apply { setPadding(0, dp(8), dp(8), dp(4)) }, wrap())
+        qrCard.addView(qrTexts, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f).apply { marginStart = dp(14) })
+        pairingSection.addView(qrCard, matchWrap(top = 12))
+
+        val visibilityRow = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            background = roundRect(LM.SURFACE_MUTED, 20f)
+            setPadding(dp(16), dp(12), dp(16), dp(12))
+        }
+        visibilityRow.addView(iconView(R.drawable.ic_lm_wifi, 18, LM.SUCCESS))
+        ipPillText = lmText("", 14f, LM.TEXT2).apply { setPadding(dp(10), 0, 0, 0) }
+        visibilityRow.addView(ipPillText)
+        pairingSection.addView(visibilityRow, matchWrap(top = 12))
+        qrPayloadText = TextView(this) // the QR's text form, for "Copy pairing text"
+        root.addView(pairingSection, matchWrap())
+
+        // Connected: which Mac, and a way to unpair.
+        connectedSection = lmCard(28f, 24, 20).apply {
+            gravity = Gravity.CENTER_HORIZONTAL
+            visibility = View.GONE
+        }
+        val checkBadge = FrameLayout(this).apply {
+            background = GradientDrawable().apply {
+                shape = GradientDrawable.OVAL
+                setColor(c(LM.SUCCESS_SOFT))
+            }
+            addView(iconView(R.drawable.ic_lm_check, 32, LM.SUCCESS).apply {
+                layoutParams = FrameLayout.LayoutParams(dp(32), dp(32), Gravity.CENTER)
+            })
+        }
+        connectedSection.addView(checkBadge, LinearLayout.LayoutParams(dp(64), dp(64)))
+        connectedTitle = lmText("Connected to your Mac", 24f, LM.TEXT, medium = true).apply {
+            gravity = Gravity.CENTER
+            setPadding(0, dp(12), 0, 0)
+        }
+        connectedSection.addView(connectedTitle)
+        connectedDetail = lmText("", 14f, LM.TEXT2).apply {
+            gravity = Gravity.CENTER
+            setPadding(0, dp(4), 0, 0)
+        }
+        connectedSection.addView(connectedDetail)
+        connectedSection.addView(lmTextButton("Unpair from Mac", R.drawable.ic_lm_unlink, LM.DANGER) {
+            PairingManager.forgetAllMacs(this@MainActivity)
+            P2PDaemonService.disconnectAllClients()
+            updatePairingUi()
+            Toast.makeText(this@MainActivity, "Unpaired. Your Mac will need the code to reconnect.", Toast.LENGTH_SHORT).show()
+        }, wrap(top = 8))
+        root.addView(connectedSection, matchWrap())
+
+        // What the Mac can use: each switch shows whether Android allows it; tap to change.
+        root.addView(createSectionHeader("Shared with your Mac"))
+        val features = lmCard(24f, 0, 4)
+        fun featureRow(icon: Int, title: String, detail: String, onTap: () -> Unit): Switch {
+            val row = LinearLayout(this).apply {
+                orientation = LinearLayout.HORIZONTAL
+                gravity = Gravity.CENTER_VERTICAL
+                setPadding(dp(16), dp(10), dp(16), dp(10))
+                isClickable = true
+                background = RippleDrawable(ColorStateList.valueOf(c("#22FFFFFF")), null, roundRect("#FFFFFF", 0f))
+                setOnClickListener { onTap() }
+            }
+            row.addView(iconTile(icon, 40, 22, LM.BRAND_SOFT, LM.BRAND, 12f))
+            val texts = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+            texts.addView(lmText(title, 16f, LM.TEXT, medium = true))
+            texts.addView(lmText(detail, 14f, LM.TEXT2))
+            row.addView(texts, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f).apply { marginStart = dp(14) })
+            val states = arrayOf(intArrayOf(android.R.attr.state_checked), intArrayOf())
+            val toggle = Switch(this).apply {
+                isClickable = false
+                isFocusable = false
+                thumbTintList = ColorStateList(states, intArrayOf(c(LM.ON_BRAND), c(LM.TEXT3)))
+                trackTintList = ColorStateList(states, intArrayOf(c(LM.BRAND), c("#3B4262")))
+            }
+            row.addView(toggle)
+            features.addView(row, matchWrap())
+            return toggle
+        }
+        val openAppSettings = {
+            startActivity(Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, Uri.fromParts("package", packageName, null)))
+        }
+        notifSwitch = featureRow(R.drawable.ic_lm_bell, "Notifications", "Mirrored on your Mac") {
+            startActivity(Intent(Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS))
+        }
+        storageSwitch = featureRow(R.drawable.ic_lm_photo, "Photos & videos", "Browse and stream from your Mac") {
+            if (isStorageAccessGranted()) {
+                openAppSettings()
+            } else if (Build.VERSION.SDK_INT >= 30) {
+                try {
+                    startActivity(Intent(Settings.ACTION_MANAGE_ALL_FILES_ACCESS_PERMISSION))
+                } catch (_: Exception) {
+                    requestPermissions(arrayOf(android.Manifest.permission.READ_EXTERNAL_STORAGE), 101)
+                }
+            } else {
+                requestPermissions(arrayOf(android.Manifest.permission.READ_EXTERNAL_STORAGE), 101)
+            }
+        }
+        phoneSwitch = featureRow(R.drawable.ic_lm_message, "Messages & calls", "Text and answer from your Mac") {
+            if (phonePermissions.all { checkSelfPermission(it) == PackageManager.PERMISSION_GRANTED }) openAppSettings()
+            else requestPermissions(phonePermissions, 103)
+        }
+        cameraSwitch = featureRow(R.drawable.ic_lm_camera, "Camera", "Live view on your Mac") {
+            if (isCameraAccessGranted()) openAppSettings()
+            else requestPermissions(arrayOf(android.Manifest.permission.CAMERA), 102)
+        }
+        controlSwitch = featureRow(R.drawable.ic_lm_pointer, "Mac Control", "Your Mac’s mouse and keyboard") {
+            startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS))
+        }
+        root.addView(features, matchWrap())
 
         // =====================================================================
         // Scope 2.5: Continuity Camera Live Hardware Controller
@@ -1004,8 +973,8 @@ class MainActivity : Activity() {
             textSize = 10f
             typeface = Typeface.DEFAULT_BOLD
             setPadding(dp(8), dp(3), dp(8), dp(3))
-            background = createPillDrawable("#1E293B", "#64748B")
-            setTextColor(Color.parseColor("#94A3B8"))
+            background = createPillDrawable("#20243A", "#6F7593")
+            setTextColor(Color.parseColor("#A6ACC4"))
         }
         camControlHeaderRow.addView(camStreamStatusBadge)
         camControlCard.addView(camControlHeaderRow)
@@ -1020,7 +989,7 @@ class MainActivity : Activity() {
             text = "ACTIVE LENS:"
             textSize = 11f
             typeface = Typeface.DEFAULT_BOLD
-            setTextColor(Color.parseColor("#94A3B8"))
+            setTextColor(Color.parseColor("#A6ACC4"))
             setPadding(0, 0, dp(8), 0)
         }
         camBadgeRow.addView(activeLensLabel)
@@ -1030,8 +999,8 @@ class MainActivity : Activity() {
             textSize = 10f
             typeface = Typeface.DEFAULT_BOLD
             setPadding(dp(8), dp(3), dp(8), dp(3))
-            background = createPillDrawable("#083344", "#06B6D4")
-            setTextColor(Color.parseColor("#67E8F9"))
+            background = createPillDrawable("#232859", "#8F98FF")
+            setTextColor(Color.parseColor("#C3C8FF"))
         }
         camBadgeRow.addView(camLensBadge)
         camControlCard.addView(camBadgeRow)
@@ -1039,7 +1008,7 @@ class MainActivity : Activity() {
         val camControlDesc = TextView(this).apply {
             text = "Switch between Front (FaceTime HD) and Back (Main 4K) cameras during video calls on Mac (FaceTime, WhatsApp, Teams, Google Meet). Flipping updates instantly on Mac."
             textSize = 12f
-            setTextColor(Color.parseColor("#94A3B8"))
+            setTextColor(Color.parseColor("#A6ACC4"))
             setLineSpacing(dp(2f), 1f)
             setPadding(0, 0, 0, dp(14))
         }
@@ -1052,7 +1021,7 @@ class MainActivity : Activity() {
 
         btnFlipCamera = createModernButton(
             text = "🔄 Switch Lens (Front ⇄ Back)",
-            bgColor = "#0284C7",
+            bgColor = "#8F98FF",
             textColor = "#FFFFFF"
         ) {
             val provider = P2PDaemonService.activeCameraProvider
@@ -1078,8 +1047,8 @@ class MainActivity : Activity() {
 
         btnToggleStream = createModernButton(
             text = "▶ Start Stream",
-            bgColor = "#1E293B",
-            textColor = "#38BDF8"
+            bgColor = "#20243A",
+            textColor = "#8F98FF"
         ) {
             val provider = P2PDaemonService.activeCameraProvider
             if (provider != null) {
@@ -1133,8 +1102,8 @@ class MainActivity : Activity() {
             textSize = 10f
             typeface = Typeface.DEFAULT_BOLD
             setPadding(dp(8), dp(3), dp(8), dp(3))
-            background = createPillDrawable("#1E293B", "#64748B")
-            setTextColor(Color.parseColor("#94A3B8"))
+            background = createPillDrawable("#20243A", "#6F7593")
+            setTextColor(Color.parseColor("#A6ACC4"))
         }
         mediaHeaderRow.addView(mediaStatusBadge)
         mediaCard.addView(mediaHeaderRow)
@@ -1144,9 +1113,9 @@ class MainActivity : Activity() {
             orientation = LinearLayout.VERTICAL
             setPadding(dp(12), dp(12), dp(12), dp(12))
             background = GradientDrawable().apply {
-                setColor(Color.parseColor("#0F172A"))
+                setColor(Color.parseColor("#0B0D17"))
                 cornerRadius = dp(10f)
-                setStroke(dp(1), Color.parseColor("#1E293B"))
+                setStroke(dp(1), Color.parseColor("#20243A"))
             }
             layoutParams = LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.MATCH_PARENT,
@@ -1158,7 +1127,7 @@ class MainActivity : Activity() {
             text = "No active media playing on Mac"
             textSize = 15f
             typeface = Typeface.DEFAULT_BOLD
-            setTextColor(Color.parseColor("#94A3B8"))
+            setTextColor(Color.parseColor("#A6ACC4"))
             setPadding(0, 0, 0, dp(4))
         }
         trackBox.addView(mediaTitleText)
@@ -1166,7 +1135,7 @@ class MainActivity : Activity() {
         mediaSubtitleText = TextView(this).apply {
             text = "Start audio or video on Mac (Spotify, YouTube, Apple Music) to control it here and in your notifications."
             textSize = 12f
-            setTextColor(Color.parseColor("#64748B"))
+            setTextColor(Color.parseColor("#6F7593"))
         }
         trackBox.addView(mediaSubtitleText)
         mediaCard.addView(trackBox)
@@ -1180,8 +1149,8 @@ class MainActivity : Activity() {
 
         btnMediaPrev = createModernButton(
             text = "⏮ Prev",
-            bgColor = "#1E293B",
-            textColor = "#38BDF8"
+            bgColor = "#20243A",
+            textColor = "#8F98FF"
         ) {
             P2PDaemonService.sendMediaCommand("PREV_TRACK")
             Toast.makeText(this@MainActivity, "Previous Track", Toast.LENGTH_SHORT).show()
@@ -1194,7 +1163,7 @@ class MainActivity : Activity() {
 
         btnMediaPlayPause = createModernButton(
             text = "⏯ Play / Pause",
-            bgColor = "#0284C7",
+            bgColor = "#8F98FF",
             textColor = "#FFFFFF"
         ) {
             P2PDaemonService.sendMediaCommand("TOGGLE_PLAY_PAUSE")
@@ -1209,8 +1178,8 @@ class MainActivity : Activity() {
 
         btnMediaNext = createModernButton(
             text = "Next ⏭",
-            bgColor = "#1E293B",
-            textColor = "#38BDF8"
+            bgColor = "#20243A",
+            textColor = "#8F98FF"
         ) {
             P2PDaemonService.sendMediaCommand("NEXT_TRACK")
             Toast.makeText(this@MainActivity, "Next Track", Toast.LENGTH_SHORT).show()
@@ -1223,7 +1192,7 @@ class MainActivity : Activity() {
         val mediaFooterDesc = TextView(this).apply {
             text = "💡 Controls any media on Mac (Apple Music, Spotify, YouTube, Podcasts, QuickTime). Media controls also appear live in your Android notification shade & lock screen."
             textSize = 11f
-            setTextColor(Color.parseColor("#64748B"))
+            setTextColor(Color.parseColor("#6F7593"))
             setLineSpacing(dp(2f), 1f)
         }
         mediaCard.addView(mediaFooterDesc)
@@ -1263,8 +1232,8 @@ class MainActivity : Activity() {
             textSize = 10f
             typeface = Typeface.DEFAULT_BOLD
             setPadding(dp(8), dp(3), dp(8), dp(3))
-            background = createPillDrawable("#052E16", "#10B981")
-            setTextColor(Color.parseColor("#34D399"))
+            background = createPillDrawable("#123222", "#3DDC84")
+            setTextColor(Color.parseColor("#3DDC84"))
         }
         clipHeaderRow.addView(clipBadge)
         clipCard.addView(clipHeaderRow)
@@ -1272,7 +1241,7 @@ class MainActivity : Activity() {
         val clipDesc = TextView(this).apply {
             text = "Text copied on Mac with ⌘C appears here instantly.\nText copied on Android is ready to paste on Mac with ⌘V."
             textSize = 12f
-            setTextColor(Color.parseColor("#94A3B8"))
+            setTextColor(Color.parseColor("#A6ACC4"))
             setLineSpacing(dp(2f), 1f)
             setPadding(0, 0, 0, dp(12))
         }
@@ -1283,7 +1252,7 @@ class MainActivity : Activity() {
             text = "CURRENT CLIPBOARD CONTENT"
             textSize = 10f
             typeface = Typeface.DEFAULT_BOLD
-            setTextColor(Color.parseColor("#64748B"))
+            setTextColor(Color.parseColor("#6F7593"))
             letterSpacing = 0.05f
             setPadding(0, 0, 0, dp(4))
         }
@@ -1293,12 +1262,12 @@ class MainActivity : Activity() {
             text = "No clipboard items synced yet. Copy text on Mac or type below."
             textSize = 12f
             typeface = Typeface.MONOSPACE
-            setTextColor(Color.parseColor("#CBD5E1"))
+            setTextColor(Color.parseColor("#F3F4FA"))
             setPadding(dp(12), dp(10), dp(12), dp(10))
             background = GradientDrawable().apply {
-                setColor(Color.parseColor("#0F172A"))
+                setColor(Color.parseColor("#0B0D17"))
                 cornerRadius = dp(8f)
-                setStroke(dp(1), Color.parseColor("#1E293B"))
+                setStroke(dp(1), Color.parseColor("#20243A"))
             }
             layoutParams = LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.MATCH_PARENT,
@@ -1315,13 +1284,13 @@ class MainActivity : Activity() {
 
         val btnCopyCurrent = createModernButton(
             text = "📋 Copy to Phone Clipboard",
-            bgColor = "#1E293B",
-            textColor = "#38BDF8"
+            bgColor = "#20243A",
+            textColor = "#8F98FF"
         ) {
             val text = currentClipDisplay.text.toString()
             if (text.isNotBlank() && !text.startsWith("No clipboard items")) {
                 val cm = getSystemService(CLIPBOARD_SERVICE) as ClipboardManager
-                cm.setPrimaryClip(ClipData.newPlainText("UniBridge", text))
+                cm.setPrimaryClip(ClipData.newPlainText("LinkMyMac", text))
                 Toast.makeText(this@MainActivity, "Copied to phone clipboard!", Toast.LENGTH_SHORT).show()
             }
         }.apply {
@@ -1337,8 +1306,8 @@ class MainActivity : Activity() {
             typeface = Typeface.DEFAULT_BOLD
             gravity = Gravity.CENTER
             setPadding(dp(12), dp(9), dp(12), dp(9))
-            background = createPillDrawable("#052E16", "#10B981")
-            setTextColor(Color.parseColor("#34D399"))
+            background = createPillDrawable("#123222", "#3DDC84")
+            setTextColor(Color.parseColor("#3DDC84"))
             layoutParams = LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.WRAP_CONTENT,
                 LinearLayout.LayoutParams.WRAP_CONTENT
@@ -1352,7 +1321,7 @@ class MainActivity : Activity() {
             text = "SEND CUSTOM TEXT TO MAC"
             textSize = 10f
             typeface = Typeface.DEFAULT_BOLD
-            setTextColor(Color.parseColor("#64748B"))
+            setTextColor(Color.parseColor("#6F7593"))
             letterSpacing = 0.05f
             setPadding(0, 0, 0, dp(4))
         }
@@ -1360,14 +1329,14 @@ class MainActivity : Activity() {
 
         clipInputText = EditText(this).apply {
             hint = "Type text, link, or note to paste on Mac..."
-            setHintTextColor(Color.parseColor("#475569"))
-            setTextColor(Color.parseColor("#F8FAFC"))
+            setHintTextColor(Color.parseColor("#3B4262"))
+            setTextColor(Color.parseColor("#F3F4FA"))
             textSize = 13f
             setPadding(dp(12), dp(10), dp(12), dp(10))
             background = GradientDrawable().apply {
-                setColor(Color.parseColor("#0F172A"))
+                setColor(Color.parseColor("#0B0D17"))
                 cornerRadius = dp(8f)
-                setStroke(dp(1), Color.parseColor("#334155"))
+                setStroke(dp(1), Color.parseColor("#262B42"))
             }
             layoutParams = LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.MATCH_PARENT,
@@ -1378,7 +1347,7 @@ class MainActivity : Activity() {
 
         val btnSendToMac = createModernButton(
             text = "🚀 Send to Mac Clipboard (⌘V)",
-            bgColor = "#0284C7",
+            bgColor = "#8F98FF",
             textColor = "#FFFFFF"
         ) {
             val text = clipInputText.text.toString().trim()
@@ -1388,7 +1357,7 @@ class MainActivity : Activity() {
                     helper.sendCustomTextToMac(text)
                 } else {
                     val cm = getSystemService(CLIPBOARD_SERVICE) as ClipboardManager
-                    cm.setPrimaryClip(ClipData.newPlainText("UniBridge", text))
+                    cm.setPrimaryClip(ClipData.newPlainText("LinkMyMac", text))
                 }
                 clipInputText.setText("")
                 updateClipboardUi()
@@ -1409,7 +1378,7 @@ class MainActivity : Activity() {
             text = "RECENT SYNCED ITEMS"
             textSize = 10f
             typeface = Typeface.DEFAULT_BOLD
-            setTextColor(Color.parseColor("#64748B"))
+            setTextColor(Color.parseColor("#6F7593"))
             letterSpacing = 0.05f
             setPadding(0, 0, 0, dp(6))
         }
@@ -1435,138 +1404,13 @@ class MainActivity : Activity() {
             text = "Send files to your Mac's Downloads folder. Files from your Mac are saved to " +
                 "Download/LinkMyMac. You can also use Share → LinkMyMac Companion in any app."
             textSize = 12f
-            setTextColor(Color.parseColor("#94A3B8"))
+            setTextColor(Color.parseColor("#A6ACC4"))
             setLineSpacing(dp(2f), 1f)
             setPadding(0, 0, 0, dp(10))
         })
-        filesCard.addView(createModernButton("Send Files to Mac", "#0284C7", "#FFFFFF") { pickFilesForMac() })
+        filesCard.addView(createModernButton("Send Files to Mac", "#8F98FF", "#FFFFFF") { pickFilesForMac() })
         root.addView(filesCard)
 
-        val qrSectionHeader = createSectionHeader("PAIR WITH YOUR MAC")
-        root.addView(qrSectionHeader)
-
-        val qrCard = createCardContainer().apply {
-            gravity = Gravity.CENTER_HORIZONTAL
-        }
-
-        val qrInstruction = TextView(this).apply {
-            text = "Type this code when UniBridge on your Mac asks for it, or scan the QR code with the Mac camera"
-            textSize = 13f
-            setTextColor(Color.parseColor("#E2E8F0"))
-            typeface = Typeface.DEFAULT_BOLD
-            gravity = Gravity.CENTER
-            setPadding(0, 0, 0, dp(10))
-        }
-        qrCard.addView(qrInstruction)
-
-        pairingCodeText = TextView(this).apply {
-            textSize = 30f
-            setTypeface(Typeface.MONOSPACE, Typeface.BOLD)
-            letterSpacing = 0.15f
-            setTextColor(Color.parseColor("#F8FAFC"))
-            gravity = Gravity.CENTER
-        }
-        qrCard.addView(pairingCodeText)
-
-        pairingStatusText = TextView(this).apply {
-            textSize = 12f
-            setTextColor(Color.parseColor("#94A3B8"))
-            gravity = Gravity.CENTER
-            setPadding(0, 0, 0, dp(14))
-        }
-        qrCard.addView(pairingStatusText)
-
-        // QR Code Scannable Image
-        val qrBorder = LinearLayout(this).apply {
-            val qrBoxSize = dp(230)
-            layoutParams = LinearLayout.LayoutParams(qrBoxSize, qrBoxSize).apply {
-                gravity = Gravity.CENTER_HORIZONTAL
-                bottomMargin = dp(16)
-            }
-            background = GradientDrawable().apply {
-                setColor(Color.WHITE)
-                cornerRadius = dp(16f)
-                setStroke(dp(3), Color.parseColor("#38BDF8"))
-            }
-            gravity = Gravity.CENTER
-            setPadding(dp(12), dp(12), dp(12), dp(12))
-        }
-
-        qrCodeImageView = ImageView(this).apply {
-            layoutParams = LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.MATCH_PARENT,
-                LinearLayout.LayoutParams.MATCH_PARENT
-            )
-        }
-        qrBorder.addView(qrCodeImageView)
-        qrCard.addView(qrBorder)
-
-        // QR Action Buttons
-        val qrButtonRow = LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.CENTER
-            setPadding(0, 0, 0, dp(12))
-        }
-
-        val btnRotateToken = createModernButton(
-            text = "Rotate Token",
-            bgColor = "#1E293B",
-            textColor = "#F8FAFC"
-        ) {
-            cryptoManager.rotateEphemeralNonce()
-            PairingManager.rotateCode()
-            updatePairingUi()
-            Toast.makeText(this@MainActivity, "New pairing code generated", Toast.LENGTH_SHORT).show()
-        }
-        btnRotateToken.layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f).apply {
-            marginEnd = dp(8)
-        }
-        qrButtonRow.addView(btnRotateToken)
-
-        val btnCopyToken = createModernButton(
-            text = "Copy JSON",
-            bgColor = "#0284C7",
-            textColor = "#FFFFFF"
-        ) {
-            val cm = getSystemService(CLIPBOARD_SERVICE) as android.content.ClipboardManager
-            cm.setPrimaryClip(android.content.ClipData.newPlainText("UniBridge-QR", qrPayloadText.text))
-            Toast.makeText(this@MainActivity, "Pairing payload copied!", Toast.LENGTH_SHORT).show()
-        }
-        btnCopyToken.layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f).apply {
-            marginStart = dp(8)
-        }
-        qrButtonRow.addView(btnCopyToken)
-        qrCard.addView(qrButtonRow)
-
-        val btnForgetMacs = createModernButton(
-            text = "Forget Paired Macs",
-            bgColor = "#3F1D1D",
-            textColor = "#FCA5A5"
-        ) {
-            PairingManager.forgetAllMacs(this@MainActivity)
-            P2PDaemonService.disconnectAllClients()
-            updatePairingUi()
-            Toast.makeText(this@MainActivity, "Macs unpaired. They'll need the code to reconnect.", Toast.LENGTH_SHORT).show()
-        }
-        btnForgetMacs.layoutParams = LinearLayout.LayoutParams(
-            LinearLayout.LayoutParams.MATCH_PARENT,
-            LinearLayout.LayoutParams.WRAP_CONTENT
-        ).apply { bottomMargin = dp(12) }
-        qrCard.addView(btnForgetMacs)
-
-        // Monospaced Debug Token Dump
-        qrPayloadText = TextView(this).apply {
-            textSize = 10f
-            typeface = Typeface.MONOSPACE
-            setTextColor(Color.parseColor("#64748B"))
-            setPadding(dp(8), dp(8), dp(8), dp(8))
-            background = GradientDrawable().apply {
-                setColor(Color.parseColor("#0F172A"))
-                cornerRadius = dp(8f)
-            }
-        }
-        qrCard.addView(qrPayloadText)
-        root.addView(qrCard)
 
         scroll.addView(root)
         setContentView(scroll)
@@ -1577,36 +1421,108 @@ class MainActivity : Activity() {
     }
 
     // =========================================================================
-    // UI Helpers: Programmatic Material 3 Components
+    // UI helpers in the LinkMyMac design language (Figma Android/* components)
     // =========================================================================
 
-    private fun createSectionHeader(title: String): TextView {
-        return TextView(this).apply {
-            text = title
-            textSize = 11f
-            typeface = Typeface.DEFAULT_BOLD
-            setTextColor(Color.parseColor("#64748B"))
-            setPadding(dp(4), dp(18), dp(4), dp(8))
-            letterSpacing = 0.08f
-        }
+    private fun c(hex: String): Int = Color.parseColor(hex)
+
+    private val mediumFace: Typeface get() = Typeface.create("sans-serif-medium", Typeface.NORMAL)
+
+    private fun roundRect(fill: String, radiusDp: Float, stroke: String? = null) = GradientDrawable().apply {
+        setColor(c(fill))
+        cornerRadius = dp(radiusDp)
+        if (stroke != null) setStroke(dp(1), c(stroke))
     }
 
-    private fun createCardContainer(): LinearLayout {
-        return LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            setPadding(dp(16), dp(16), dp(16), dp(16))
-            background = GradientDrawable().apply {
-                setColor(Color.parseColor("#141923"))
-                cornerRadius = dp(16f)
-                setStroke(dp(1), Color.parseColor("#1E293B"))
-            }
-            layoutParams = LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.MATCH_PARENT,
-                LinearLayout.LayoutParams.WRAP_CONTENT
-            ).apply {
-                bottomMargin = dp(12)
-            }
+    private fun lmText(text: String, sizeSp: Float, color: String, medium: Boolean = false) = TextView(this).apply {
+        this.text = text
+        textSize = sizeSp
+        setTextColor(c(color))
+        if (medium) typeface = mediumFace
+    }
+
+    private fun lmCard(radiusDp: Float = 24f, padH: Int = 16, padV: Int = 16) = LinearLayout(this).apply {
+        orientation = LinearLayout.VERTICAL
+        background = roundRect(LM.SURFACE, radiusDp)
+        setPadding(dp(padH), dp(padV), dp(padH), dp(padV))
+    }
+
+    private fun iconView(res: Int, sizeDp: Int, tint: String) = ImageView(this).apply {
+        setImageResource(res)
+        imageTintList = ColorStateList.valueOf(c(tint))
+        layoutParams = LinearLayout.LayoutParams(dp(sizeDp), dp(sizeDp))
+    }
+
+    private fun iconTile(res: Int, tileDp: Int, iconDp: Int, bg: String, tint: String, radiusDp: Float) = FrameLayout(this).apply {
+        background = roundRect(bg, radiusDp)
+        layoutParams = LinearLayout.LayoutParams(dp(tileDp), dp(tileDp))
+        addView(iconView(res, iconDp, tint).apply { layoutParams = FrameLayout.LayoutParams(dp(iconDp), dp(iconDp), Gravity.CENTER) })
+    }
+
+    /** The LinkMyMac mark: brand gradient squircle with the link glyph (Figma Brand/App icon). */
+    private fun brandMark(sizeDp: Int) = FrameLayout(this).apply {
+        background = GradientDrawable(GradientDrawable.Orientation.TL_BR, intArrayOf(c("#6673FF"), c("#8C5CF5"))).apply {
+            cornerRadius = dp(sizeDp * 0.25f)
         }
+        layoutParams = LinearLayout.LayoutParams(dp(sizeDp), dp(sizeDp))
+        val glyph = (sizeDp * 0.56f).toInt()
+        addView(iconView(R.drawable.ic_lm_link, glyph, "#FFFFFF").apply {
+            layoutParams = FrameLayout.LayoutParams(dp(glyph), dp(glyph), Gravity.CENTER)
+        })
+    }
+
+    /** Status pill (Figma Android/Status chip). */
+    private fun lmChip() = TextView(this).apply {
+        textSize = 12f
+        typeface = mediumFace
+        letterSpacing = 0.03f
+        setPadding(dp(10), dp(6), dp(12), dp(6))
+    }
+
+    private fun setChip(view: TextView, text: String, tone: String) {
+        val (bg, dot, fg) = when (tone) {
+            "success" -> Triple(LM.SUCCESS_SOFT, LM.SUCCESS, LM.SUCCESS)
+            "warning" -> Triple(LM.WARNING_SOFT, LM.WARNING, LM.WARNING)
+            "neutral" -> Triple(LM.SURFACE_MUTED, LM.TEXT3, LM.TEXT2)
+            else -> Triple(LM.BRAND_SOFT, LM.BRAND, LM.ON_BRAND_SOFT)
+        }
+        view.text = SpannableStringBuilder().append("●  ", ForegroundColorSpan(c(dot)), Spanned.SPAN_EXCLUSIVE_EXCLUSIVE).append(text)
+        view.setTextColor(c(fg))
+        view.background = roundRect(bg, 999f)
+    }
+
+    /** Text button with an optional leading icon (Figma Android/Button, Text variant). */
+    private fun lmTextButton(text: String, icon: Int?, color: String, onClick: () -> Unit) = LinearLayout(this).apply {
+        orientation = LinearLayout.HORIZONTAL
+        gravity = Gravity.CENTER_VERTICAL
+        setPadding(dp(14), dp(10), dp(14), dp(10))
+        isClickable = true
+        background = RippleDrawable(ColorStateList.valueOf(c("#22FFFFFF")), null, roundRect("#FFFFFF", 22f))
+        setOnClickListener { onClick() }
+        if (icon != null) addView(iconView(icon, 18, color).apply { (layoutParams as LinearLayout.LayoutParams).marginEnd = dp(8) })
+        addView(lmText(text, 14f, color, medium = true))
+    }
+
+    private fun matchWrap(top: Int = 0) =
+        LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT).apply { topMargin = dp(top) }
+
+    private fun wrap(top: Int = 0) =
+        LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT).apply { topMargin = dp(top) }
+
+    private fun createSectionHeader(title: String): TextView = TextView(this).apply {
+        text = title.uppercase()
+        textSize = 12f
+        typeface = mediumFace
+        letterSpacing = 0.07f
+        setTextColor(c(LM.TEXT3))
+        setPadding(dp(8), dp(20), dp(8), dp(8))
+    }
+
+    private fun createCardContainer(): LinearLayout = lmCard(24f, 16, 16).apply {
+        layoutParams = LinearLayout.LayoutParams(
+            LinearLayout.LayoutParams.MATCH_PARENT,
+            LinearLayout.LayoutParams.WRAP_CONTENT
+        ).apply { bottomMargin = dp(12) }
     }
 
     private fun createPillDrawable(bgColorHex: String, strokeColorHex: String): GradientDrawable {
@@ -1617,97 +1533,52 @@ class MainActivity : Activity() {
         }
     }
 
-    private fun createFeatureCard(
-        iconRes: String,
-        titleText: String,
-        descriptionText: String,
-        statusPillInit: (TextView) -> Unit,
-        actionButtonInit: (Button) -> Unit
-    ): LinearLayout {
-        val card = createCardContainer()
-
-        val topRow = LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.CENTER_VERTICAL
-            setPadding(0, 0, 0, dp(6))
-        }
-
-        val iconTitleRow = LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.CENTER_VERTICAL
-            layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
-        }
-
-        val iconView = TextView(this).apply {
-            text = iconRes
-            textSize = 18f
-            setPadding(0, 0, dp(10), 0)
-        }
-        iconTitleRow.addView(iconView)
-
-        val titleView = TextView(this).apply {
-            text = titleText
-            textSize = 14f
-            typeface = Typeface.DEFAULT_BOLD
-            setTextColor(Color.WHITE)
-        }
-        iconTitleRow.addView(titleView)
-        topRow.addView(iconTitleRow)
-
-        val pill = TextView(this).apply {
-            text = "CHECKING..."
-            textSize = 9f
-            typeface = Typeface.DEFAULT_BOLD
-            setPadding(dp(8), dp(3), dp(8), dp(3))
-        }
-        statusPillInit(pill)
-        topRow.addView(pill)
-        card.addView(topRow)
-
-        val descView = TextView(this).apply {
-            text = descriptionText
-            textSize = 12f
-            setTextColor(Color.parseColor("#94A3B8"))
-            setLineSpacing(dp(2f), 1f)
-            setPadding(0, 0, 0, dp(10))
-        }
-        card.addView(descView)
-
-        val btn = createModernButton(
-            text = "Grant Access",
-            bgColor = "#0284C7",
-            textColor = "#FFFFFF"
-        ) {}
-        actionButtonInit(btn)
-        card.addView(btn)
-
-        return card
-    }
-
+    /** Pill button (Figma Android/Button): brand fill for the main action, tonal otherwise. */
+    @Suppress("UNUSED_PARAMETER")
     private fun createModernButton(
         text: String,
         bgColor: String,
         textColor: String,
         onClick: () -> Unit
     ): Button {
+        val (bg, fg) = when (bgColor.uppercase()) {
+            LM.BRAND -> LM.BRAND to LM.ON_BRAND
+            LM.DANGER_SOFT -> LM.DANGER_SOFT to LM.DANGER
+            else -> LM.BRAND_SOFT to LM.ON_BRAND_SOFT
+        }
         return Button(this).apply {
             this.text = text
-            this.setTextColor(Color.parseColor(textColor))
-            this.textSize = 12f
-            this.typeface = Typeface.DEFAULT_BOLD
-            this.isAllCaps = false
-            this.setPadding(dp(16), dp(10), dp(16), dp(10))
-
-            val normalDrawable = GradientDrawable().apply {
-                setColor(Color.parseColor(bgColor))
-                cornerRadius = dp(10f)
-                setStroke(dp(1), Color.parseColor("#334155"))
-            }
-
-            val rippleColor = ColorStateList.valueOf(Color.parseColor("#38BDF8"))
-            background = RippleDrawable(rippleColor, normalDrawable, null)
-
+            setTextColor(c(fg))
+            textSize = 14f
+            typeface = mediumFace
+            isAllCaps = false
+            minHeight = dp(44)
+            minimumHeight = dp(44)
+            stateListAnimator = null
+            setPadding(dp(20), dp(10), dp(20), dp(10))
+            background = RippleDrawable(ColorStateList.valueOf(c("#33FFFFFF")), roundRect(bg, 22f), null)
             setOnClickListener { onClick() }
         }
     }
+}
+
+/** LinkMyMac dark-mode tokens (Figma "LinkMyMac" variables, Dark mode). */
+private object LM {
+    const val CANVAS = "#0B0D17"
+    const val SURFACE = "#171A2B"
+    const val SURFACE_MUTED = "#20243A"
+    const val BORDER = "#262B42"
+    const val TEXT = "#F3F4FA"
+    const val TEXT2 = "#A6ACC4"
+    const val TEXT3 = "#6F7593"
+    const val BRAND = "#8F98FF"
+    const val ON_BRAND = "#0B0D17"
+    const val BRAND_SOFT = "#232859"
+    const val ON_BRAND_SOFT = "#C3C8FF"
+    const val SUCCESS = "#3DDC84"
+    const val SUCCESS_SOFT = "#123222"
+    const val WARNING = "#F6B84B"
+    const val WARNING_SOFT = "#3A2B0C"
+    const val DANGER = "#FF6E76"
+    const val DANGER_SOFT = "#3B1418"
 }
