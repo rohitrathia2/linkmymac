@@ -915,22 +915,25 @@ struct DashboardView: View {
     private func mediaCard(_ item: RemoteMediaItem) -> some View {
         VStack(alignment: .leading, spacing: 8) {
             ZStack(alignment: .topTrailing) {
-                // Thumbnail
-                Group {
-                    if let data = item.thumbnailData,
-                       let nsImage = NSImage(data: data) {
-                        Image(nsImage: nsImage)
-                            .resizable()
-                            .scaledToFill()
-                            .frame(height: 140)
-                            .clipped()
-                    } else {
-                        Rectangle()
-                            .fill(Color.gray.opacity(0.18))
-                            .frame(height: 140)
-                            .overlay(Image(systemName: "photo").font(.largeTitle).foregroundColor(.gray))
+                // Thumbnail: the grid column sets the size and the image fills it, cropped.
+                // scaledToFill + frame(height:) alone let a landscape thumbnail (most videos)
+                // claim 140 × 16/9 ≈ 249 pt and push the card past its column.
+                Color.gray.opacity(0.18)
+                    .frame(maxWidth: .infinity)
+                    .frame(height: 140)
+                    .overlay {
+                        if let data = item.thumbnailData,
+                           let nsImage = NSImage(data: data) {
+                            Image(nsImage: nsImage)
+                                .resizable()
+                                .scaledToFill()
+                        } else {
+                            Image(systemName: item.isVideo ? "film" : "photo")
+                                .font(.largeTitle)
+                                .foregroundColor(.gray)
+                        }
                     }
-                }
+                    .clipped()
                 .overlay(alignment: .bottomLeading) {
                     if item.isVideo {
                         Label(formatDuration(item.durationMs), systemImage: "play.fill")
