@@ -1,0 +1,105 @@
+{
+  "schemaVersion": 1,
+  "ok": true,
+  "command": "finalize",
+  "status": "pass",
+  "type": "architecture",
+  "quality": "showcase",
+  "specification": {
+    "path": "/Users/rathia/Downloads/linkmymac-project/.archify/architecture-linkmymac-20261112-142500/candidate.json",
+    "sha256": "eff385f97af962a1c3844ead1f1c638954f1845750de9e81358a163676b64053",
+    "bytes": 7839
+  },
+  "artifact": {
+    "path": "/Users/rathia/Downloads/linkmymac-project/.archify/architecture-linkmymac-20261112-142500/linkmymac-architecture.html",
+    "sha256": "4ec2e2f40a021b04753934d3dbe6aeecedfae804d377554af6f8e969689256f2",
+    "bytes": 779779
+  },
+  "gates": {
+    "validate": "pass",
+    "deliver": "pass",
+    "check": "pass",
+    "browser-check": "pass"
+  },
+  "diagnostics": [],
+  "diagnosticSummary": {
+    "total": 0,
+    "shown": 0,
+    "truncated": false
+  },
+  "evidence": {
+    "receipt": "/Users/rathia/Downloads/linkmymac-project/.archify/architecture-linkmymac-20261112-142500/linkmymac-architecture.finalize.json",
+    "summaryReceipt": "/Users/rathia/Downloads/linkmymac-project/.archify/architecture-linkmymac-20261112-142500/linkmymac-architecture.finalize-summary.json",
+    "browserCheckReceipt": "/Users/rathia/Downloads/linkmymac-project/.archify/architecture-linkmymac-20261112-142500/linkmymac-architecture.browser-check.json"
+  },
+  "visualReview": "not-requested",
+  "durationMs": 5056,
+  "visualReviewRecommendation": {
+    "action": "inspect-route-readability",
+    "signals": {
+      "routesOverSuggestedBends": 4
+    },
+    "reason": "Automated gates passed, but crossings or detours still need perceptual review before claiming visual quality.",
+    "affectedRoutes": {
+      "crossings": [],
+      "detours": [
+        {
+          "relationship": {
+            "id": "macP2pToMdns",
+            "from": "macP2P",
+            "to": "transportMdns",
+            "label": "NWBrowser Discovery",
+            "collectionIndex": 3,
+            "artifactIndex": 4
+          },
+          "bends": 3,
+          "stretch": 1
+        },
+        {
+          "relationship": {
+            "id": "macP2pToAdb",
+            "from": "macP2P",
+            "to": "transportAdb",
+            "label": "USB Tunnel 127.0.0.1",
+            "collectionIndex": 5,
+            "artifactIndex": 6
+          },
+          "bends": 3,
+          "stretch": 1
+        },
+        {
+          "relationship": {
+            "id": "daemonToMdns",
+            "from": "androidDaemon",
+            "to": "transportMdns",
+            "label": "NsdManager Registration",
+            "collectionIndex": 7,
+            "artifactIndex": 8
+          },
+          "bends": 3,
+          "stretch": 1
+        },
+        {
+          "relationship": {
+            "id": "daemonToMedia",
+            "from": "androidDaemon",
+            "to": "androidMedia",
+            "label": "WebP Thumbnails &amp; 64KB Chunks",
+            "collectionIndex": 13,
+            "artifactIndex": 14
+          },
+          "bends": 3,
+          "stretch": 1
+        }
+      ],
+      "truncated": false
+    },
+    "hints": [
+      "macP2P → transportMdns needs 3 bends: move node macP2P or transportMdns so they share a row or column with matching centers, or sit diagonally with a clear corner.",
+      "macP2P → transportAdb needs 3 bends: move node macP2P or transportAdb so they share a row or column with matching centers, or sit diagonally with a clear corner.",
+      "androidDaemon → transportMdns needs 3 bends: move node androidDaemon or transportMdns so they share a row or column with matching centers, or sit diagonally with a clear corner.",
+      "androidDaemon → androidMedia needs 3 bends: move node androidDaemon or androidMedia so they share a row or column with matching centers, or sit diagonally with a clear corner."
+    ],
+    "repair": "Trace these relationships at the desktop viewport. For Architecture, use references/architecture-layout-repair.md: reflow a blocked main path or tangled connected scene, and repair an isolated defect locally only when the surrounding composition is accepted. Preserve all semantic content and user-fixed geometry. Rerun finalize once after the edit."
+  }
+}

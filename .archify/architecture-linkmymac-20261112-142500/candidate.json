@@ -1,0 +1,284 @@
+{
+  "schema_version": 1,
+  "diagram_type": "architecture",
+  "meta": {
+    "title": "LinkMyMac — Open-Source Cross-Device P2P Architecture",
+    "output": ".archify/architecture-linkmymac-20261112-142500/linkmymac-architecture.html",
+    "quality_profile": "showcase",
+    "locale": "en"
+  },
+  "components": [
+    {
+      "id": "macUi",
+      "type": "frontend",
+      "label": "SwiftUI Dashboard & MenuBar",
+      "sublabel": "SplitView & NSStatusItem",
+      "pos": [50, 190],
+      "size": [180, 68]
+    },
+    {
+      "id": "macSubsystems",
+      "type": "backend",
+      "label": "Mac Subsystems Bridge",
+      "sublabel": "NSPasteboard & UNNotificationCenter",
+      "pos": [50, 420],
+      "size": [180, 68]
+    },
+    {
+      "id": "macKeychain",
+      "type": "security",
+      "label": "Keychain / CryptoKit",
+      "sublabel": "Pinned Leaf Cert Verification",
+      "pos": [370, 80],
+      "size": [180, 64]
+    },
+    {
+      "id": "macP2P",
+      "type": "backend",
+      "label": "MacP2PClient Engine",
+      "sublabel": "NWBrowser & NWConnection",
+      "pos": [370, 300],
+      "size": [180, 76]
+    },
+    {
+      "id": "transportMdns",
+      "type": "messagebus",
+      "label": "mDNS / DNS-SD Discovery",
+      "sublabel": "_linkmymac._tcp.local. (Port 8765)",
+      "pos": [700, 80],
+      "size": [200, 64]
+    },
+    {
+      "id": "transportTcp",
+      "type": "messagebus",
+      "label": "Length-Delimited P2P Stream",
+      "sublabel": "8-Byte Header + TLS 1.3 Socket",
+      "pos": [700, 300],
+      "size": [200, 76]
+    },
+    {
+      "id": "transportAdb",
+      "type": "external",
+      "label": "USB ADB Forward Tunnel",
+      "sublabel": "adb forward tcp:8765 tcp:8765",
+      "pos": [700, 420],
+      "size": [200, 64]
+    },
+    {
+      "id": "androidCrypto",
+      "type": "security",
+      "label": "CryptoKeystoreManager",
+      "sublabel": "AndroidKeyStore EC P-256 & QR",
+      "pos": [1060, 80],
+      "size": [180, 64]
+    },
+    {
+      "id": "androidDaemon",
+      "type": "backend",
+      "label": "P2PDaemonService",
+      "sublabel": "Foreground Daemon & ServerSocket",
+      "pos": [1060, 300],
+      "size": [180, 76]
+    },
+    {
+      "id": "androidUi",
+      "type": "frontend",
+      "label": "MainActivity Companion",
+      "sublabel": "QR Display & Permission UI",
+      "pos": [1410, 80],
+      "size": [190, 64]
+    },
+    {
+      "id": "androidNotif",
+      "type": "backend",
+      "label": "LMMNotificationListener",
+      "sublabel": "StatusBarNotification & RemoteInput",
+      "pos": [1410, 190],
+      "size": [190, 64]
+    },
+    {
+      "id": "androidClip",
+      "type": "backend",
+      "label": "ClipboardSyncHelper",
+      "sublabel": "ClipboardManager & SHA-256 Dedup",
+      "pos": [1410, 300],
+      "size": [190, 64]
+    },
+    {
+      "id": "androidMedia",
+      "type": "database",
+      "label": "MediaStoreProvider",
+      "sublabel": "Scoped Storage & 64KB Chunks",
+      "pos": [1410, 420],
+      "size": [190, 64]
+    }
+  ],
+  "boundaries": [
+    {
+      "kind": "region",
+      "label": "macOS Client Environment (Swift 6 / SwiftUI / AppKit)",
+      "wraps": ["macUi", "macSubsystems", "macKeychain", "macP2P"]
+    },
+    {
+      "kind": "security-group",
+      "label": "Local-Only Transport Layer (Zero Cloud Infrastructure)",
+      "wraps": ["transportMdns", "transportTcp", "transportAdb"]
+    },
+    {
+      "kind": "region",
+      "label": "Android Companion Environment (Kotlin / Foreground Daemon)",
+      "wraps": ["androidCrypto", "androidDaemon", "androidUi", "androidNotif", "androidClip", "androidMedia"]
+    }
+  ],
+  "connections": [
+    {
+      "id": "macUiToP2p",
+      "from": "macUi",
+      "to": "macP2P",
+      "label": "UI Actions & State",
+      "fromSide": "right",
+      "toSide": "left"
+    },
+    {
+      "id": "macSubToP2p",
+      "from": "macSubsystems",
+      "to": "macP2P",
+      "label": "Clipboard & Quick Reply",
+      "fromSide": "right",
+      "toSide": "left"
+    },
+    {
+      "id": "macKeyToP2p",
+      "from": "macKeychain",
+      "to": "macP2P",
+      "label": "Pinned Leaf Cert Check",
+      "variant": "security",
+      "fromSide": "bottom",
+      "toSide": "top"
+    },
+    {
+      "id": "macP2pToMdns",
+      "from": "macP2P",
+      "to": "transportMdns",
+      "label": "NWBrowser Discovery",
+      "variant": "dashed",
+      "fromSide": "top",
+      "toSide": "left"
+    },
+    {
+      "id": "macP2pToTcp",
+      "from": "macP2P",
+      "to": "transportTcp",
+      "label": "8-Byte Framed Packets",
+      "variant": "emphasis",
+      "fromSide": "right",
+      "toSide": "left"
+    },
+    {
+      "id": "macP2pToAdb",
+      "from": "macP2P",
+      "to": "transportAdb",
+      "label": "USB Tunnel 127.0.0.1",
+      "variant": "dashed",
+      "fromSide": "bottom",
+      "toSide": "left"
+    },
+    {
+      "id": "tcpToAndroidDaemon",
+      "from": "transportTcp",
+      "to": "androidDaemon",
+      "label": "Multiplexed Frames :8765",
+      "variant": "emphasis",
+      "fromSide": "right",
+      "toSide": "left"
+    },
+    {
+      "id": "daemonToMdns",
+      "from": "androidDaemon",
+      "to": "transportMdns",
+      "label": "NsdManager Registration",
+      "variant": "dashed",
+      "fromSide": "top",
+      "toSide": "right"
+    },
+    {
+      "id": "adbToAndroidDaemon",
+      "from": "transportAdb",
+      "to": "androidDaemon",
+      "label": "tcp:8765 Port Forward",
+      "variant": "dashed",
+      "fromSide": "right",
+      "toSide": "bottom"
+    },
+    {
+      "id": "androidCryptoToDaemon",
+      "from": "androidCrypto",
+      "to": "androidDaemon",
+      "label": "mTLS & Signed Challenge",
+      "variant": "security",
+      "fromSide": "bottom",
+      "toSide": "top"
+    },
+    {
+      "id": "androidUiToCrypto",
+      "from": "androidUi",
+      "to": "androidCrypto",
+      "label": "Rotate Ephemeral Nonce",
+      "fromSide": "left",
+      "toSide": "right"
+    },
+    {
+      "id": "notifToDaemon",
+      "from": "androidNotif",
+      "to": "androidDaemon",
+      "label": "StatusBarNotification Stream",
+      "fromSide": "left",
+      "toSide": "right"
+    },
+    {
+      "id": "clipToDaemon",
+      "from": "androidClip",
+      "to": "androidDaemon",
+      "label": "Universal Clipboard (SHA-256)",
+      "fromSide": "left",
+      "toSide": "right"
+    },
+    {
+      "id": "daemonToMedia",
+      "from": "androidDaemon",
+      "to": "androidMedia",
+      "label": "WebP Thumbnails & 64KB Chunks",
+      "fromSide": "bottom",
+      "toSide": "left"
+    }
+  ],
+  "cards": [
+    {
+      "dot": "cyan",
+      "title": "Zero-Cloud Transport & Framing",
+      "items": [
+        "8-byte length-delimited framing: 0x4C4D ('LM') magic + 2-byte flags + 4-byte big-endian length",
+        "Single multiplexed TCP stream on port 8765 handling control, notifications, clipboard, and file chunks",
+        "Seamless offline fallback to USB ADB loopback via 'adb forward tcp:8765 tcp:8765'"
+      ]
+    },
+    {
+      "dot": "rose",
+      "title": "Hardware Security & Out-of-Band Pairing",
+      "items": [
+        "Hardware-backed EC P-256 keys generated in AndroidKeyStore and Apple Keychain / CryptoKit",
+        "Out-of-band QR code exchange of LAN IP addresses, leaf certificate SHA-256 fingerprint, and ephemeral nonce",
+        "Mutual TLS (mTLS 1.3) connection strictly pinned to verified leaf certificate fingerprints"
+      ]
+    },
+    {
+      "dot": "emerald",
+      "title": "Native Subsystem Synchronization",
+      "items": [
+        "NotificationListenerService intercepts notifications, extracts app icon & RemoteInput quick-reply actions",
+        "Bidirectional clipboard synchronization with SHA-256 content deduplication to prevent echo loops",
+        "MediaStore photo thumbnail indexing (200x200 WebP) and 64 KB chunked file transfer with CRC32"
+      ]
+    }
+  ]
+}

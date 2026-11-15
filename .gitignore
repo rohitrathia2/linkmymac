@@ -1,0 +1,16 @@
+# Build output (rebuild with macos-app/bundle.sh and ./gradlew)
+LinkMyMac.app/
+macos-app/.build/
+android-app/.gradle/
+android-app/.kotlin/
+android-app/build/
+*.apk
+
+# Machine-specific (Android SDK path)
+android-app/local.properties
+
+# OS / editors
+.DS_Store
+.idea/
+*.iml
+.swiftpm/

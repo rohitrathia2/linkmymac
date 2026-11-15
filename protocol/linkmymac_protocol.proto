@@ -1,0 +1,188 @@
+syntax = "proto3";
+
+package com.linkmymac.protocol;
+
+option java_package = "com.linkmymac.protocol";
+option java_multiple_files = true;
+option swift_prefix = "LMM";
+
+// Top-level length-delimited frame transmitted over the mTLS P2P socket.
+// Wire format: [4-byte big-endian uint32 payload length][Protobuf Frame bytes]
+message LMMFrame {
+  string frame_id = 1;
+  int64 timestamp_ms = 2;
+  uint32 sequence_number = 3;
+
+  oneof payload {
+    PairingHandshake pairing_handshake = 10;
+    PairingAck pairing_ack = 11;
+    HeartbeatPing ping = 12;
+    HeartbeatPong pong = 13;
+    NotificationEvent notification_event = 14;
+    NotificationActionRequest notification_action = 15;
+    ClipboardSyncEvent clipboard_event = 16;
+    MediaIndexRequest media_index_request = 17;
+    MediaIndexResponse media_index_response = 18;
+    FileTransferOffer file_offer = 19;
+    FileTransferAccept file_accept = 20;
+    FileChunk file_chunk = 21;
+    FileTransferComplete file_complete = 22;
+    SmsThreadListResponse sms_threads = 23;
+    SendSmsRequest send_sms = 24;
+  }
+}
+
+// 1. Pairing & Cryptographic Authentication
+message PairingHandshake {
+  string device_id = 1;
+  string device_name = 2;
+  string platform = 3; // "macos" or "android"
+  bytes public_key_ed25519 = 4;
+  bytes cert_sha256_fingerprint = 5;
+  string ephemeral_nonce = 6;
+  bytes signature = 7; // Ed25519 signature over (device_id || cert_sha256_fingerprint || ephemeral_nonce)
+}
+
+message PairingAck {
+  bool accepted = 1;
+  string device_id = 2;
+  string device_name = 3;
+  string error_message = 4;
+  bytes signature = 5;
+}
+
+// 2. Keepalive Heartbeat
+message HeartbeatPing {
+  int64 client_time_ms = 1;
+  uint32 battery_percent = 2;
+  bool is_charging = 3;
+}
+
+message HeartbeatPong {
+  int64 client_time_ms = 1;
+  int64 server_time_ms = 2;
+  uint32 battery_percent = 3;
+  bool is_charging = 4;
+}
+
+// 3. Real-Time Notifications & Quick Replies
+message NotificationEvent {
+  enum EventType {
+    POSTED = 0;
+    REMOVED = 1;
+  }
+  EventType event_type = 1;
+  string notification_key = 2;
+  string package_name = 3;
+  string app_name = 4;
+  string title = 5;
+  string body = 6;
+  string sub_text = 7;
+  int64 post_time_ms = 8;
+  bytes app_icon_webp = 9;
+  repeated NotificationActionItem actions = 10;
+}
+
+message NotificationActionItem {
+  string action_id = 1;
+  string title = 2;
+  bool supports_inline_reply = 3;
+  string reply_placeholder = 4;
+}
+
+message NotificationActionRequest {
+  string notification_key = 1;
+  string action_id = 2;
+  string inline_reply_text = 3; // Populated if supports_inline_reply == true
+  bool dismiss_only = 4;
+}
+
+// 4. Universal Clipboard Sync
+message ClipboardSyncEvent {
+  enum ContentType {
+    PLAIN_TEXT = 0;
+    IMAGE_PNG = 1;
+    IMAGE_WEBP = 2;
+    URL = 3;
+  }
+  ContentType content_type = 1;
+  string text_value = 2;
+  bytes binary_data = 3;
+  string content_sha256 = 4; // Used for loop-prevention / deduplication
+}
+
+// 5. Virtual Gallery & Photo Thumbnail Indexing
+message MediaIndexRequest {
+  uint32 offset = 1;
+  uint32 limit = 2;
+  bool include_thumbnails = 3;
+}
+
+message MediaItemMetadata {
+  string media_id = 1;
+  string display_name = 2;
+  string mime_type = 3;
+  int64 date_modified_sec = 4;
+  int64 size_bytes = 5;
+  uint32 width = 6;
+  uint32 height = 7;
+  bytes thumbnail_webp = 8; // 200x200 compressed WebP
+}
+
+message MediaIndexResponse {
+  uint32 offset = 1;
+  uint32 total_count = 2;
+  repeated MediaItemMetadata items = 3;
+}
+
+// 6. Chunked File Transfer ("LinkMyDrop")
+message FileTransferOffer {
+  string transfer_id = 1;
+  string file_name = 2;
+  string mime_type = 3;
+  uint64 total_bytes = 4;
+  uint32 chunk_size = 5; // Default: 65536 (64 KB)
+  string file_sha256 = 6;
+}
+
+message FileTransferAccept {
+  string transfer_id = 1;
+  bool accepted = 2;
+  uint32 resume_from_chunk = 3;
+}
+
+message FileChunk {
+  string transfer_id = 1;
+  uint32 chunk_index = 2;
+  uint32 total_chunks = 3;
+  bytes data = 4;
+  uint32 crc32_checksum = 5;
+}
+
+message FileTransferComplete {
+  string transfer_id = 1;
+  bool verified = 2;
+  string sha256_digest = 3;
+  string error_message = 4;
+}
+
+// 7. Direct SMS & Messaging
+message SmsMessageItem {
+  string message_id = 1;
+  string thread_id = 2;
+  string address = 3;
+  string contact_name = 4;
+  string body = 5;
+  int64 date_ms = 6;
+  bool is_incoming = 7;
+}
+
+message SmsThreadListResponse {
+  repeated SmsMessageItem recent_messages = 1;
+}
+
+message SendSmsRequest {
+  string request_id = 1;
+  string recipient_address = 2;
+  string message_body = 3;
+}

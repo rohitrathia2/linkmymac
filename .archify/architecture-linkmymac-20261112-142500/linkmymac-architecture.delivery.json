@@ -1,0 +1,17 @@
+{
+  "schemaVersion": 1,
+  "receiptId": "ef7f87da-5df8-46ed-8147-951ee5e370cd",
+  "status": "current",
+  "command": "deliver",
+  "type": "architecture",
+  "input": "/Users/rathia/Downloads/linkmymac-project/.archify/architecture-linkmymac-20261112-142500/candidate.json",
+  "output": "/Users/rathia/Downloads/linkmymac-project/.archify/architecture-linkmymac-20261112-142500/linkmymac-architecture.html",
+  "specification": {
+    "sha256": "eff385f97af962a1c3844ead1f1c638954f1845750de9e81358a163676b64053",
+    "bytes": 7839
+  },
+  "artifact": {
+    "sha256": "4ec2e2f40a021b04753934d3dbe6aeecedfae804d377554af6f8e969689256f2",
+    "bytes": 779779
+  }
+}
