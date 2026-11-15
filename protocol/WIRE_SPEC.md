@@ -68,6 +68,22 @@ mac   → MEDIA_RANGE_CANCEL  {requestId}
 - Phone recordings keep the MP4 index at the end of the file. AVPlayer fetches it first with a tail range, then streams from the start.
 - The phone reads with blocking writes (paced by the link) and checks for `MEDIA_RANGE_CANCEL` between chunks. The Mac cancels on seek and when the player closes; a dropped connection ends every open range with an error.
 
+## 4c. Phone features (SMS, calls, mirroring, control, hotspot)
+| Mac → phone | Phone → Mac | Notes |
+|:---|:---|:---|
+| `SMS_THREADS_REQUEST {limit}` | `SMS_THREADS {threads: [{threadId, address, name, snippet, dateMs, unread}]}` or `{error}` | `READ_SMS`; names need `READ_CONTACTS` |
+| `SMS_MESSAGES_REQUEST {threadId, limit}` | `SMS_MESSAGES {threadId, messages: [{id, body, dateMs, incoming}]}` | Oldest first |
+| `SMS_SEND {requestId, address, body}` | `SMS_SEND_RESULT {requestId, ok, error?}` | `SEND_SMS`; long text goes as multipart |
+| (none) | `SMS_UPDATED` | Sent when anything changes in the SMS store (debounced 0.5 s) |
+| `CALL_ACTION {action: answer, decline or end}`, `CALL_DIAL {number}` | `CALL_ACTION_RESULT {ok, error?}` | `ANSWER_PHONE_CALLS`, `CALL_PHONE` |
+| `CALL_LOG_REQUEST {limit}` | `CALL_LOG {calls: [{number, name, kind, dateMs, durationSec}]}` or `{error}` | `READ_CALL_LOG` |
+| (none) | `CALL_STATE {state: ringing, active or idle; number; name}` | `READ_PHONE_STATE` (`READ_CALL_LOG` adds the number). Call audio stays on the phone. |
+| `MIRROR_START`, `MIRROR_STOP` | `MIRROR_STATUS {active, width, height, controlEnabled, error?}`, `MIRROR_FRAME {width, height, jpegBase64}` | The person approves Android's capture prompt each session. Up to 720 px wide and ~12 fps; when the link is slow, frames are dropped, not queued. |
+| `INPUT_TAP {x, y, durationMs}`, `INPUT_SWIPE {x1, y1, x2, y2, durationMs}`, `INPUT_TEXT {text}`, `INPUT_KEY {key: backspace or enter}`, `INPUT_GLOBAL {action: back, home, recents or notifications}` | `CONTROL_STATUS {enabled: false}` while Mac Control is off | Positions are 0–1 of the screen. Needs the "LinkMyMac Mac Control" accessibility service. |
+| `HOTSPOT_REQUEST` | `HOTSPOT_RESULT {prompted}` | Apps can't switch tethering on, so the phone shows a one-tap notification that opens Hotspot settings |
+
+`HEARTBEAT_PONG` also carries `network` (`5G`, `4G`, …) and `signalLevel` (0–4, or -1 when unknown).
+
 ## 5. Other messages (JSON `type`)
 | Direction | Types |
 |:---|:---|

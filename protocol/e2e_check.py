@@ -129,6 +129,21 @@ def main():
     send(sock, {"type": "HEARTBEAT_PING", "clientTimeMs": 42})
     pong = recv_type(sock, "HEARTBEAT_PONG")
     check("paired client gets data", pong.get("clientTimeMs") == 42)
+    check("heartbeat carries network + signal", "network" in pong and "signalLevel" in pong)
+
+    # Phone features answer even without permissions. Nothing here reads, sends, dials, captures or taps.
+    send(sock, {"type": "SMS_THREADS_REQUEST", "limit": 1})
+    reply = recv_type(sock, "SMS_THREADS", timeout=15)
+    check("SMS requests are answered", "threads" in reply or "error" in reply)
+    send(sock, {"type": "CALL_LOG_REQUEST", "limit": 1})
+    reply = recv_type(sock, "CALL_LOG", timeout=15)
+    check("call log requests are answered", "calls" in reply or "error" in reply)
+    send(sock, {"type": "INPUT_TEXT", "text": ""})  # a no-op even when Mac Control is on
+    try:
+        reply = recv_type(sock, "CONTROL_STATUS", timeout=3)
+        check("input without Mac Control reports it off", reply.get("enabled") is False)
+    except socket.timeout:
+        print("      Mac Control is on (input accepted)")
 
     # Photos and videos page separately (the Mac shows them in separate sections).
     pages = {}

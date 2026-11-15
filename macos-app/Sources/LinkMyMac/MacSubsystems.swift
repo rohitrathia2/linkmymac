@@ -87,11 +87,33 @@ public final class MacSubsystems: NSObject, UNUserNotificationCenterDelegate {
             }
         }
 
+        p2pClient.phone.onRingingChanged = { [weak self] caller in
+            Task { @MainActor in
+                self?.updateIncomingCallBanner(caller)
+            }
+        }
+
         p2pClient.onFileReceived = { [weak self] url in
             Task { @MainActor in
                 self?.postFileReceivedBanner(url)
             }
         }
+    }
+
+    /// Incoming-call banner with Answer / Decline; removed once the phone stops ringing.
+    private func updateIncomingCallBanner(_ caller: String?) {
+        guard Bundle.main.bundleIdentifier != nil else { return }
+        let center = UNUserNotificationCenter.current()
+        guard let caller else {
+            center.removeDeliveredNotifications(withIdentifiers: ["incoming-call"])
+            return
+        }
+        let content = UNMutableNotificationContent()
+        content.title = "Incoming call"
+        content.body = "\(caller) (audio stays on the phone)"
+        content.sound = .default
+        content.categoryIdentifier = "INCOMING_CALL"
+        center.add(UNNotificationRequest(identifier: "incoming-call", content: content, trigger: nil))
     }
 
     /// "Received from phone" banner; clicking it reveals the file in Finder.
@@ -259,7 +281,17 @@ public final class MacSubsystems: NSObject, UNUserNotificationCenterDelegate {
             options: []
         )
 
-        center.setNotificationCategories([category])
+        let callCategory = UNNotificationCategory(
+            identifier: "INCOMING_CALL",
+            actions: [
+                UNNotificationAction(identifier: "CALL_ANSWER", title: "Answer", options: []),
+                UNNotificationAction(identifier: "CALL_DECLINE", title: "Decline", options: [.destructive])
+            ],
+            intentIdentifiers: [],
+            options: []
+        )
+
+        center.setNotificationCategories([category, callCategory])
         center.requestAuthorization(options: [.alert, .sound, .badge]) { _, _ in }
     }
 
@@ -330,6 +362,15 @@ public final class MacSubsystems: NSObject, UNUserNotificationCenterDelegate {
         withCompletionHandler completionHandler: @escaping () -> Void
     ) {
         let userInfo = response.notification.request.content.userInfo
+        if response.notification.request.content.categoryIdentifier == "INCOMING_CALL" {
+            let action = response.actionIdentifier
+            Task { @MainActor in
+                if action == "CALL_ANSWER" { self.p2pClient.phone.answer() }
+                if action == "CALL_DECLINE" { self.p2pClient.phone.decline() }
+            }
+            completionHandler()
+            return
+        }
         if let path = userInfo["fileURL"] as? String {
             let url = URL(fileURLWithPath: path)
             Task { @MainActor in NSWorkspace.shared.activateFileViewerSelecting([url]) }
