@@ -65,7 +65,7 @@ The first time a Mac connects, the phone shows a 6-character code in its top sta
 |:---|:---|:---|
 | Notification mirroring + quick reply | ✅ | `NotificationListenerService` + `RemoteInput` → `UNUserNotificationCenter` |
 | Clipboard sync (text) | ✅ | `ClipboardManager` ⇄ `NSPasteboard`, SHA-256 dedup |
-| Photos and videos: browse, play, download, share, delete | ✅ | Separate Photos and Videos sections, each paged on its own. **Group by Folder** mirrors the phone's storage folders (Camera, Screenshots, WhatsApp…). **Play** fetches a video and plays it in AVKit |
+| Photos and videos: browse, play, download, share, delete | ✅ | Separate Photos and Videos sections, each paged on its own. **Group by Folder** mirrors the phone's storage folders (Camera, Screenshots, WhatsApp…), each collapsible. **Play** streams a video in byte ranges, so it starts after the first few hundred KB |
 | File sharing, both directions | ✅ | Mac: File Sharing tab (drop zone), Dock icon, menu bar. Android: Share → LinkMyMac Companion, or "Send Files to Mac" |
 | Phone camera on the Mac | ✅ in-app only | camera2 JPEG frames shown in the app; it is not a system webcam (no CMIO extension) |
 | Mac "Now Playing" controls on the phone | ✅ | Media notification on Android |
@@ -106,3 +106,9 @@ It plays the Mac's role against the real phone and checks:
 - a Mac → phone file transfer
 
 It unpairs its throwaway test client at the end, so your real pairing is left alone.
+
+Video streaming on the Mac side (no phone needed) plays a synthetic MP4 over a throttled fake link and fails if playback waits for most of the file:
+```bash
+cd macos-app && swiftc -parse-as-library Sources/LinkMyMac/MediaStreamLoader.swift \
+    Checks/StreamLoaderCheck.swift -o .build/stream-check && .build/stream-check
+```

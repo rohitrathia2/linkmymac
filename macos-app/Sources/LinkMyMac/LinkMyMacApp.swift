@@ -203,6 +203,7 @@ struct DashboardView: View {
     @State private var previewMediaItem: RemoteMediaItem? = nil
     @State private var previewAutoplay: Bool = false
     @AppStorage("LinkMyMac.groupMediaByFolder") private var groupMediaByFolder = false
+    @State private var collapsedFolders: Set<String> = []
     @State private var notificationSearchText: String = ""
     @State private var photoSearchText: String = ""
     @State private var showFaceTimeGuide: Bool = false
@@ -826,11 +827,13 @@ struct DashboardView: View {
                         if groupMediaByFolder {
                             ForEach(mediaFolders(items)) { folder in
                                 Section {
-                                    ForEach(folder.items) { item in
-                                        mediaCard(item)
+                                    if !collapsedFolders.contains(folderKey(kind, folder)) {
+                                        ForEach(folder.items) { item in
+                                            mediaCard(item)
+                                        }
                                     }
                                 } header: {
-                                    folderHeader(folder)
+                                    folderHeader(folder, kind: kind)
                                 }
                             }
                         } else {
@@ -856,25 +859,50 @@ struct DashboardView: View {
         return order.map { MediaFolder(path: $0, items: groups[$0, default: []]) }
     }
 
-    private func folderHeader(_ folder: MediaFolder) -> some View {
-        HStack(spacing: 8) {
-            Image(systemName: "folder.fill")
-                .foregroundColor(.accentColor)
-            Text(folder.name)
-                .font(.headline)
-            Text(folder.path)
-                .font(.caption)
-                .foregroundColor(.secondary)
-                .lineLimit(1)
-                .truncationMode(.middle)
-            Spacer()
-            Text("\(folder.items.count)")
-                .font(.caption.bold())
-                .foregroundColor(.secondary)
+    /// Photos and Videos can both have e.g. DCIM/Camera/, so collapse state is per section.
+    private func folderKey(_ kind: MediaKind, _ folder: MediaFolder) -> String {
+        "\(kind.rawValue):\(folder.path)"
+    }
+
+    /// Whole header toggles; the chevron points right when collapsed, down when open.
+    private func folderHeader(_ folder: MediaFolder, kind: MediaKind) -> some View {
+        let key = folderKey(kind, folder)
+        let collapsed = collapsedFolders.contains(key)
+        return Button {
+            withAnimation(.easeInOut(duration: 0.15)) {
+                if collapsed {
+                    collapsedFolders.remove(key)
+                } else {
+                    collapsedFolders.insert(key)
+                }
+            }
+        } label: {
+            HStack(spacing: 8) {
+                Image(systemName: "chevron.right")
+                    .font(.caption.bold())
+                    .foregroundColor(.secondary)
+                    .rotationEffect(.degrees(collapsed ? 0 : 90))
+                Image(systemName: "folder.fill")
+                    .foregroundColor(.accentColor)
+                Text(folder.name)
+                    .font(.headline)
+                Text(folder.path)
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                Spacer()
+                Text("\(folder.items.count)")
+                    .font(.caption.bold())
+                    .foregroundColor(.secondary)
+            }
+            .padding(.vertical, 8)
+            .padding(.horizontal, 4)
+            .contentShape(Rectangle())
         }
-        .padding(.vertical, 8)
-        .padding(.horizontal, 4)
+        .buttonStyle(.plain)
         .background(Color(NSColor.windowBackgroundColor)) // pinned header: hide cards scrolling under it
+        .help(collapsed ? "Expand folder" : "Collapse folder")
     }
 
     private func filteredMediaItems(_ kind: MediaKind) -> [RemoteMediaItem] {
@@ -1885,11 +1913,11 @@ struct PhotoDetailPreviewSheet: View {
     @ObservedObject var p2pClient: MacP2PClient
     var autoplay = false
     @Environment(\.dismiss) private var dismiss
-    /// Built once per downloaded video; making it inside `body` would restart playback on every re-render.
+    /// Built once, on first Play; making it inside `body` would restart playback on every re-render.
     @State private var player: AVPlayer?
-    /// Play was pressed before the video was on this Mac: start as soon as the download lands.
-    @State private var wantsPlayback = false
-    @State private var isPlaying = false
+    /// Streams the video from the phone when it isn't downloaded (lives as long as the player).
+    @State private var streamLoader: MediaStreamLoader?
+    @State private var playback: AVPlayer.TimeControlStatus = .paused
 
     private var download: FileTransfer? {
         p2pClient.transfers.first { $0.id == "media_\(item.id)" && $0.status == .inProgress }
@@ -1923,7 +1951,7 @@ struct PhotoDetailPreviewSheet: View {
                     VideoPlayer(player: player)
                         .padding(8)
                         .onReceive(player.publisher(for: \.timeControlStatus).receive(on: RunLoop.main)) {
-                            isPlaying = $0 == .playing // also follows AVKit's own controls
+                            playback = $0 // also follows AVKit's own controls
                         }
                 } else if !item.isVideo,
                           let localUrl = p2pClient.localFileURL(for: item.id),
@@ -1950,14 +1978,13 @@ struct PhotoDetailPreviewSheet: View {
 
             HStack {
                 if item.isVideo {
-                    let downloading = player == nil && download != nil
                     Button(action: togglePlayback) {
-                        Label(downloading ? "Downloading…" : (isPlaying ? "Pause" : "Play"),
-                              systemImage: isPlaying ? "pause.fill" : "play.fill")
-                            .frame(minWidth: 90)
+                        Label(playback == .playing ? "Pause" : playback == .waitingToPlayAtSpecifiedRate ? "Buffering…" : "Play",
+                              systemImage: playback == .paused ? "play.fill" : "pause.fill")
+                            .frame(minWidth: 100)
                     }
                     .buttonStyle(.borderedProminent)
-                    .disabled(downloading)
+                    .disabled(!canPlay)
                 }
 
                 Button {
@@ -1982,54 +2009,58 @@ struct PhotoDetailPreviewSheet: View {
             .padding([.bottom, .horizontal])
         }
         .frame(minWidth: 520, minHeight: 460)
-        .task(id: p2pClient.localFileURL(for: item.id)) {
-            if item.isVideo, let url = p2pClient.localFileURL(for: item.id) {
-                let newPlayer = AVPlayer(url: url)
-                player = newPlayer
-                if wantsPlayback { newPlayer.play() }
-            }
-        }
         .onAppear { if autoplay { togglePlayback() } }
-        .onDisappear { player?.pause() }
-    }
-
-    /// Big play button over the thumbnail; becomes a progress ring while the video downloads.
-    @ViewBuilder private var playOverlay: some View {
-        if let download {
-            ProgressView(value: Double(download.bytesTransferred), total: Double(max(download.totalBytes, 1)))
-                .progressViewStyle(.circular)
-                .controlSize(.large)
-                .tint(.white)
-        } else {
-            Button(action: togglePlayback) {
-                Image(systemName: "play.circle.fill")
-                    .font(.system(size: 54))
-                    .symbolRenderingMode(.palette)
-                    .foregroundStyle(.white, .black.opacity(0.45))
-            }
-            .buttonStyle(.plain)
-            .help("Play")
+        .onDisappear {
+            player?.pause()
+            streamLoader?.stopAll() // tell the phone to stop sending
         }
     }
 
-    /// Play/pause. Until the video is on this Mac, downloads it and plays when it lands.
+    /// Big play button over the thumbnail.
+    private var playOverlay: some View {
+        Button(action: togglePlayback) {
+            Image(systemName: "play.circle.fill")
+                .font(.system(size: 54))
+                .symbolRenderingMode(.palette)
+                .foregroundStyle(.white, .black.opacity(0.45))
+        }
+        .buttonStyle(.plain)
+        .disabled(!canPlay)
+        .help("Play")
+    }
+
+    private var canPlay: Bool {
+        p2pClient.isPaired || p2pClient.localFileURL(for: item.id) != nil
+    }
+
+    /// Play/pause. Plays the downloaded copy if there is one, otherwise streams it from the phone.
     private func togglePlayback() {
-        guard let player else {
-            wantsPlayback = true
-            // The player may just not exist yet (it's made in .task); only fetch what isn't here.
-            if p2pClient.localFileURL(for: item.id) == nil, download == nil {
-                p2pClient.downloadFullResolutionMedia(mediaId: item.id)
-            }
+        if player?.currentItem?.status == .failed { // e.g. the connection dropped mid-stream: start over
+            streamLoader?.stopAll()
+            streamLoader = nil
+            player = nil
+        }
+        if player == nil {
+            player = makePlayer()
+        }
+        guard let player else { return }
+        if player.timeControlStatus != .paused {
+            player.pause()
             return
         }
-        if player.timeControlStatus == .playing {
-            player.pause()
-        } else {
-            if let current = player.currentItem, current.duration.isNumeric, current.currentTime() >= current.duration {
-                player.seek(to: .zero) // finished: play again from the start
-            }
-            player.play()
+        if let current = player.currentItem, current.duration.isNumeric, current.currentTime() >= current.duration {
+            player.seek(to: .zero) // finished: play again from the start
         }
+        player.play()
+    }
+
+    private func makePlayer() -> AVPlayer? {
+        if let url = p2pClient.localFileURL(for: item.id) {
+            return AVPlayer(url: url)
+        }
+        guard let loader = p2pClient.makeStreamLoader(for: item) else { return nil }
+        streamLoader = loader
+        return loader.makePlayer()
     }
 
     private func formatBytes(_ bytes: Int64) -> String {

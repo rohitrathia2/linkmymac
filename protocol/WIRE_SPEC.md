@@ -57,11 +57,22 @@ receiver → FILE_TRANSFER_RESULT   {transferId, ok, error?}
 - The phone saves to `Download/LinkMyMac` through MediaStore. The Mac saves to `~/Downloads` and never overwrites (`name (1).ext`). Both sides reduce incoming names to a plain file name.
 - Gallery downloads reuse this: the Mac sends `MEDIA_DOWNLOAD_REQUEST {mediaId, transferId: "media_<id>"}`, and the phone answers with the frames above and the name `media_<id>.<ext>`.
 
+## 4b. Video streaming (byte ranges)
+```
+mac   → MEDIA_RANGE_REQUEST {requestId, mediaId, offset, length}
+phone → MEDIA_RANGE_DATA    {requestId, offset, dataBase64 (≤ 256 KB raw)}   in order, repeated
+phone → MEDIA_RANGE_DONE    {requestId, error?}
+mac   → MEDIA_RANGE_CANCEL  {requestId}
+```
+- The Mac's AVPlayer issues these through an `AVAssetResourceLoaderDelegate`, so playback starts after the first few hundred KB instead of after a full download. Seeking is just another range.
+- Phone recordings keep the MP4 index at the end of the file. AVPlayer fetches it first with a tail range, then streams from the start.
+- The phone reads with blocking writes (paced by the link) and checks for `MEDIA_RANGE_CANCEL` between chunks. The Mac cancels on seek and when the player closes; a dropped connection ends every open range with an error.
+
 ## 5. Other messages (JSON `type`)
 | Direction | Types |
 |:---|:---|
-| Mac → phone | `HEARTBEAT_PING` (every 5 s), `NOTIFICATIONS_SYNC_REQUEST`, `NOTIFICATION_ACTION`, `NOTIFICATION_DISMISS`, `NOTIFICATION_CLEAR_ALL`, `CLIPBOARD_EVENT`, `MEDIA_INDEX_REQUEST`, `MEDIA_DOWNLOAD_REQUEST`, `MEDIA_DELETE_REQUEST`, `CAMERA_CONTROL`, `NOW_PLAYING_UPDATE`, `UNPAIR` |
-| Phone → Mac | `HEARTBEAT_PONG` (battery %), `NOTIFICATION_EVENT`, `CLIPBOARD_EVENT`, `MEDIA_INDEX_RESPONSE`, `MEDIA_GALLERY_UPDATED`, `MEDIA_DELETE_RESPONSE`, `CAMERA_FRAME`, `CAMERA_STREAM_STATUS`, `MEDIA_CONTROL_COMMAND` |
+| Mac → phone | `HEARTBEAT_PING` (every 5 s), `NOTIFICATIONS_SYNC_REQUEST`, `NOTIFICATION_ACTION`, `NOTIFICATION_DISMISS`, `NOTIFICATION_CLEAR_ALL`, `CLIPBOARD_EVENT`, `MEDIA_INDEX_REQUEST`, `MEDIA_DOWNLOAD_REQUEST`, `MEDIA_DELETE_REQUEST`, `CAMERA_CONTROL`, `NOW_PLAYING_UPDATE`, `UNPAIR`, `MEDIA_RANGE_REQUEST`, `MEDIA_RANGE_CANCEL` |
+| Phone → Mac | `HEARTBEAT_PONG` (battery %), `NOTIFICATION_EVENT`, `CLIPBOARD_EVENT`, `MEDIA_INDEX_RESPONSE`, `MEDIA_GALLERY_UPDATED`, `MEDIA_DELETE_RESPONSE`, `CAMERA_FRAME`, `CAMERA_STREAM_STATUS`, `MEDIA_CONTROL_COMMAND`, `MEDIA_RANGE_DATA`, `MEDIA_RANGE_DONE` |
 
 **Gallery paging.** `MEDIA_INDEX_REQUEST {offset, limit, includeThumbnails, mediaType}` takes `mediaType` `"image"` or `"video"` so photos and videos page independently, newest first. Leaving it out pages both together. The response echoes `mediaType`, and its `totalCount` covers that type only. Videos include `durationMs`. Every item carries `bucket` (its folder, e.g. `Camera`) and `relativePath` (e.g. `DCIM/Camera/`), which the Mac uses for Group by Folder.
 

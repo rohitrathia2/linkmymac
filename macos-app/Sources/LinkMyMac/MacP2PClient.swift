@@ -228,6 +228,9 @@ public final class MacP2PClient: ObservableObject {
     }
     private var incomingFiles: [String: IncomingFile] = [:]
 
+    // Video streaming: byte ranges in flight -> the player's loader waiting for them
+    private var mediaRangeSinks: [String: (MediaRangeEvent) -> Void] = [:]
+
     // Subsystem Callbacks
     public var onRemoteClipboardReceived: ((String, String) -> Void)?
     public var onMirroredNotificationPosted: ((MirroredNotification) -> Void)?
@@ -458,6 +461,9 @@ public final class MacP2PClient: ObservableObject {
         challenge = nil
         pairingKey = nil
         syncingKind = nil // otherwise the Sync spinner would spin forever after a drop
+        let openRanges = mediaRangeSinks.values
+        mediaRangeSinks.removeAll()
+        openRanges.forEach { $0(.done(error: "Connection lost")) } // the player shows an error instead of hanging
         failUnfinishedTransfers(reason: "Connection lost")
         connectedDeviceName = nil
         connectionState = "Disconnected"
@@ -651,6 +657,17 @@ public final class MacP2PClient: ObservableObject {
 
         case "FILE_TRANSFER_COMPLETE":
             finishIncomingFile(json)
+
+        case "MEDIA_RANGE_DATA":
+            if let id = json["requestId"] as? String, let sink = mediaRangeSinks[id],
+               let data = (json["dataBase64"] as? String).flatMap({ Data(base64Encoded: $0) }) {
+                sink(.data(data))
+            }
+
+        case "MEDIA_RANGE_DONE":
+            if let id = json["requestId"] as? String, let sink = mediaRangeSinks.removeValue(forKey: id) {
+                sink(.done(error: json["error"] as? String))
+            }
 
         case "FILE_TRANSFER_RESULT":
             // The phone's verdict on a file we sent it.
@@ -1200,6 +1217,32 @@ public final class MacP2PClient: ObservableObject {
      * HOW IT DOES IT: Sends `MEDIA_DOWNLOAD_REQUEST` with numeric media ID.
      * WHY IT DOES IT: Fetches original photo bytes on user demand.
      */
+    /// Streams a video from the phone in byte ranges (MEDIA_RANGE_REQUEST), so playback starts
+    /// right away. Keep the loader alive while its player is in use; stopAll() when done.
+    func makeStreamLoader(for item: RemoteMediaItem) -> MediaStreamLoader? {
+        guard let mediaId = Int64(item.id) else { return nil }
+        return MediaStreamLoader(
+            mimeType: item.mimeType,
+            size: item.sizeBytes,
+            requestRange: { [weak self] id, offset, length, sink in
+                guard let self else { return sink(.done(error: "Closed")) }
+                self.mediaRangeSinks[id] = sink
+                let sent = self.sendControlJSON([
+                    "type": "MEDIA_RANGE_REQUEST", "requestId": id,
+                    "mediaId": mediaId, "offset": offset, "length": length
+                ])
+                if !sent {
+                    self.mediaRangeSinks[id] = nil
+                    sink(.done(error: "Phone not connected"))
+                }
+            },
+            cancelRange: { [weak self] id in
+                guard let self, self.mediaRangeSinks.removeValue(forKey: id) != nil else { return }
+                self.sendControlJSON(["type": "MEDIA_RANGE_CANCEL", "requestId": id])
+            }
+        )
+    }
+
     public func downloadFullResolutionMedia(mediaId: String) {
         guard let numericId = Int64(mediaId) else { return }
         let transferId = "media_\(mediaId)"

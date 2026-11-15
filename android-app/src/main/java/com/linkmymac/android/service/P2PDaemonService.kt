@@ -26,6 +26,7 @@ import com.linkmymac.android.crypto.PairingManager
 import org.json.JSONObject
 import java.io.DataInputStream
 import java.io.DataOutputStream
+import java.io.FileInputStream
 import java.io.InputStream
 import java.io.OutputStream
 import java.net.ServerSocket
@@ -72,6 +73,7 @@ class P2PDaemonService : Service() {
         private const val MAX_SESSIONS = 8 // caps threads an unauthenticated flood can pin
         private const val PRE_AUTH_TIMEOUT_MS = 30_000
         private const val FILE_CHUNK_BYTES = 64 * 1024
+        private const val RANGE_CHUNK_BYTES = 256 * 1024
         private const val FILES_CHANNEL_ID = "linkmymac_files"
 
         @Volatile
@@ -409,6 +411,9 @@ class P2PDaemonService : Service() {
         /** Files being received from the Mac. Touched only by this session's read thread. */
         private val incomingFiles = HashMap<String, IncomingFile>()
 
+        /** Video byte ranges the Mac no longer needs (seek, or player closed). */
+        private val cancelledRanges = java.util.concurrent.ConcurrentHashMap.newKeySet<String>()
+
         /**
          * ---------------------------------------------------------------------
          * run: Inbound Stream Parsing Loop
@@ -494,6 +499,16 @@ class P2PDaemonService : Service() {
                     PairingManager.forgetMac(this@P2PDaemonService, macDeviceId)
                     close()
                 }
+
+                // Video streaming: the Mac's player asks for byte ranges as it needs them
+                "MEDIA_RANGE_REQUEST" -> {
+                    val requestId = json.optString("requestId")
+                    val uri = mediaProvider.contentUriFor(json.optLong("mediaId"))
+                    val offset = json.optLong("offset")
+                    val length = json.optLong("length")
+                    ioExecutor.execute { streamRange(requestId, uri, offset, length) }
+                }
+                "MEDIA_RANGE_CANCEL" -> cancelledRanges.add(json.optString("requestId"))
 
                 // Mac → phone file sharing (saved to Download/LinkMyMac)
                 "FILE_OFFER" -> beginIncoming(json)
@@ -741,6 +756,43 @@ class P2PDaemonService : Service() {
                 }
             } catch (e: Exception) {
                 Log.w(TAG, "File transfer $transferId failed: ${e.message}")
+            }
+        }
+
+        /**
+         * Sends [length] bytes from [offset] as MEDIA_RANGE_DATA frames, then MEDIA_RANGE_DONE.
+         * Blocking writes pace it to the link; a MEDIA_RANGE_CANCEL stops it between chunks.
+         */
+        private fun streamRange(requestId: String, uri: Uri, offset: Long, length: Long) {
+            var error: String? = null
+            try {
+                contentResolver.openFileDescriptor(uri, "r")?.use { pfd ->
+                    FileInputStream(pfd.fileDescriptor).use { input ->
+                        input.channel.position(offset)
+                        val buffer = ByteArray(RANGE_CHUNK_BYTES)
+                        var position = offset
+                        var remaining = length
+                        while (remaining > 0 && requestId !in cancelledRanges) {
+                            val n = input.read(buffer, 0, minOf(buffer.size.toLong(), remaining).toInt())
+                            if (n < 0) break
+                            sendJsonNow(JSONObject()
+                                .put("type", "MEDIA_RANGE_DATA")
+                                .put("requestId", requestId)
+                                .put("offset", position)
+                                .put("dataBase64", Base64.encodeToString(buffer, 0, n, Base64.NO_WRAP)))
+                            position += n
+                            remaining -= n
+                        }
+                    }
+                } ?: run { error = "Media not found" }
+            } catch (e: Exception) {
+                error = e.message ?: "Read failed"
+            } finally {
+                cancelledRanges.remove(requestId)
+                sendJson(JSONObject()
+                    .put("type", "MEDIA_RANGE_DONE")
+                    .put("requestId", requestId)
+                    .apply { error?.let { put("error", it) } })
             }
         }
 
