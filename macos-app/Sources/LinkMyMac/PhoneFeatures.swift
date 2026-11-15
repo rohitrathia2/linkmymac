@@ -261,3 +261,42 @@ final class PhoneFeatures: ObservableObject {
         Date(timeIntervalSince1970: Double((value as? NSNumber)?.int64Value ?? 0) / 1000)
     }
 }
+
+#if DEBUG
+extension PhoneFeatures {
+    /// Sample threads, calls and a mirrored screen for design checks (see MacP2PClient.loadPreviewData).
+    func loadPreviewData() {
+        let now = Date()
+        threads = [
+            SmsThread(id: 1, address: "+1 (415) 555-0132", name: "Alex Chen", snippet: "Running 10 min late, sorry!", date: now.addingTimeInterval(-120), unread: false),
+            SmsThread(id: 2, address: "+1 (415) 555-0101", name: "Mom", snippet: "Did you eat? Call when you can.", date: now.addingTimeInterval(-5_400), unread: true),
+            SmsThread(id: 3, address: "+1 (415) 555-0188", name: "Priya Sharma", snippet: "Sent the slides, take a look", date: now.addingTimeInterval(-12_000), unread: true),
+            SmsThread(id: 4, address: "AX-PARCEL", name: "", snippet: "Your parcel is out for delivery today.", date: now.addingTimeInterval(-20_000), unread: false),
+            SmsThread(id: 5, address: "+1 (415) 555-0123", name: "Dad", snippet: "Call me when you are free", date: now.addingTimeInterval(-90_000), unread: false),
+            SmsThread(id: 6, address: "+1 (415) 555-0177", name: "Jordan Lee", snippet: "Haha yes, see you Saturday", date: now.addingTimeInterval(-260_000), unread: false),
+        ]
+        openThreadId = 1
+        messages = [
+            SmsMessage(id: 1, body: "Are we still on for dinner tonight?", date: now.addingTimeInterval(-1_800), incoming: true),
+            SmsMessage(id: 2, body: "Yes! I booked a table at the place near the station.", date: now.addingTimeInterval(-1_700), incoming: false),
+            SmsMessage(id: 3, body: "Perfect. What time?", date: now.addingTimeInterval(-1_600), incoming: true),
+            SmsMessage(id: 4, body: "7:30. I'll grab us a table if I'm early.", date: now.addingTimeInterval(-1_500), incoming: false),
+            SmsMessage(id: 5, body: "Running 10 min late, sorry!", date: now.addingTimeInterval(-120), incoming: true),
+        ]
+        callState = .ringing(caller: "Priya Sharma")
+        recentCalls = [
+            RecentCall(number: "+1 (415) 555-0188", name: "Priya Sharma", kind: "missed", date: now.addingTimeInterval(-3_600), durationSec: 0),
+            RecentCall(number: "+1 (415) 555-0101", name: "Mom", kind: "incoming", date: now.addingTimeInterval(-7_200), durationSec: 724),
+            RecentCall(number: "+1 (415) 555-0132", name: "", kind: "outgoing", date: now.addingTimeInterval(-90_000), durationSec: 151),
+            RecentCall(number: "+1 (415) 555-0132", name: "Alex Chen", kind: "outgoing", date: now.addingTimeInterval(-100_000), durationSec: 48),
+            RecentCall(number: "", name: "Unknown number", kind: "declined", date: now.addingTimeInterval(-300_000), durationSec: 0),
+            RecentCall(number: "+1 (415) 555-0123", name: "Dad", kind: "incoming", date: now.addingTimeInterval(-400_000), durationSec: 322),
+        ]
+        network = "5G"
+        signalLevel = 4
+        controlEnabled = true
+        isMirroring = true
+        screenFrame = PreviewArt.thumbnail(3, width: 360, height: 800).flatMap { NSImage(data: $0) }
+    }
+}
+#endif

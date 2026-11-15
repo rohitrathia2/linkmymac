@@ -1,12 +1,50 @@
 import AppKit
 import SwiftUI
 
-// MARK: - Messages
+// MARK: - Shared pieces
+
+/// Contact initials on a tinted circle; the tint is stable per name (Figma Mac/Avatar).
+struct ContactAvatar: View {
+    let name: String
+    var size: CGFloat = 36
+    private static let palette: [(UInt32, UInt32)] = [
+        (0xDCE7FF, 0x2346B8), (0xFCE1EE, 0xA3175B), (0xEAE0FF, 0x5B2BB5), (0xFFEBC7, 0x8F5400),
+        (0xD4F4E2, 0x0B7A3B), (0xD2F3EF, 0x0B6E66), (0xE6E8F0, 0x4A5068),
+    ]
+    var body: some View {
+        let (bg, fg) = Self.palette[name.unicodeScalars.reduce(0) { $0 &+ Int($1.value) } % Self.palette.count]
+        Text(initials)
+            .font(.system(size: size * 0.36, weight: .semibold))
+            .foregroundStyle(Self.color(fg))
+            .frame(width: size, height: size)
+            .background(Circle().fill(Self.color(bg)))
+    }
+    private var initials: String {
+        let words = name.split(separator: " ").filter { $0.first?.isLetter == true }
+        guard !words.isEmpty else { return "#" }
+        return words.prefix(2).compactMap { $0.first.map(String.init) }.joined().uppercased()
+    }
+    private static func color(_ hex: UInt32) -> Color {
+        Color(red: Double((hex >> 16) & 0xFF) / 255, green: Double((hex >> 8) & 0xFF) / 255, blue: Double(hex & 0xFF) / 255)
+    }
+}
+
+/// "7:42 PM" today, "Yesterday", weekday this week, else "12 Nov".
+func shortDate(_ date: Date) -> String {
+    let calendar = Calendar.current
+    if calendar.isDateInToday(date) { return date.formatted(date: .omitted, time: .shortened) }
+    if calendar.isDateInYesterday(date) { return "Yesterday" }
+    if let days = calendar.dateComponents([.day], from: date, to: .now).day, days < 7 { return date.formatted(.dateTime.weekday(.abbreviated)) }
+    return date.formatted(.dateTime.day().month(.abbreviated))
+}
+
+// MARK: - Messages (Figma: Mac · Messages)
 
 struct MessagesView: View {
     @ObservedObject var phone: PhoneFeatures
     @State private var draft = ""
     @State private var newRecipient = ""
+    @State private var search = ""
 
     private var openThread: PhoneFeatures.SmsThread? {
         phone.threads.first { $0.id == phone.openThreadId }
@@ -16,100 +54,104 @@ struct MessagesView: View {
         openThread?.address ?? newRecipient.trimmingCharacters(in: .whitespaces)
     }
 
+    private var visibleThreads: [PhoneFeatures.SmsThread] {
+        guard !search.isEmpty else { return phone.threads }
+        let q = search.lowercased()
+        return phone.threads.filter { $0.title.lowercased().contains(q) || $0.snippet.lowercased().contains(q) }
+    }
+
     var body: some View {
         HStack(spacing: 0) {
-            VStack(spacing: 0) {
-                HStack {
-                    Text("Messages").font(.title2.bold())
-                    Spacer()
-                    Button { phone.startNewMessage() } label: { Image(systemName: "square.and.pencil") }
-                        .buttonStyle(.borderless)
-                        .help("New message")
-                    Button { phone.refreshThreads() } label: { Image(systemName: "arrow.clockwise") }
-                        .buttonStyle(.borderless)
-                        .help("Refresh")
-                }
-                .padding(14)
-                Divider()
+            VStack(spacing: 8) {
+                LMSearchField(placeholder: "Search messages", text: $search, width: nil)
                 if phone.threads.isEmpty {
-                    emptyHint(phone.smsError ?? "No conversations yet")
+                    EmptyStateView(symbol: "message", title: "No conversations", message: phone.smsError ?? "Texts on your phone show up here.")
                 } else {
-                    List(phone.threads) { thread in
-                        Button { phone.open(thread: thread.id) } label: { threadRow(thread) }
-                            .buttonStyle(.plain)
-                            .listRowBackground(thread.id == phone.openThreadId ? Color.accentColor.opacity(0.15) : Color.clear)
+                    ScrollView {
+                        LazyVStack(spacing: 2) {
+                            ForEach(visibleThreads) { thread in
+                                Button { phone.open(thread: thread.id) } label: { threadRow(thread, selected: thread.id == phone.openThreadId) }
+                                    .buttonStyle(.plain)
+                            }
+                        }
                     }
-                    .listStyle(.plain)
                 }
             }
-            .frame(width: 290)
+            .padding(12)
+            .frame(width: 320)
+            .frame(maxHeight: .infinity, alignment: .top)
+            .overlay(alignment: .trailing) { Rectangle().fill(Theme.borderSubtle).frame(width: 1) }
 
-            Divider()
             conversation
+                .background(Theme.surface)
+        }
+        .navigationTitle("Messages")
+        .navigationSubtitle("Texts from your phone")
+        .toolbar {
+            ToolbarItemGroup(placement: .primaryAction) {
+                IconButton(symbol: "square.and.pencil", help: "New message") { phone.startNewMessage() }
+                IconButton(symbol: "arrow.clockwise", help: "Refresh") { phone.refreshThreads() }
+            }
         }
         .onAppear { if phone.threads.isEmpty { phone.refreshThreads() } }
     }
 
-    private func threadRow(_ thread: PhoneFeatures.SmsThread) -> some View {
-        HStack(alignment: .top, spacing: 8) {
-            Circle()
-                .fill(thread.unread ? Color.accentColor : Color.clear)
-                .frame(width: 8, height: 8)
-                .padding(.top, 5)
+    private func threadRow(_ thread: PhoneFeatures.SmsThread, selected: Bool) -> some View {
+        HStack(spacing: 10) {
+            ContactAvatar(name: thread.title)
             VStack(alignment: .leading, spacing: 2) {
-                HStack {
-                    Text(thread.title).font(.subheadline.bold()).lineLimit(1)
-                    Spacer()
-                    Text(thread.date, format: .dateTime.day().month(.abbreviated))
-                        .font(.caption2)
-                        .foregroundColor(.secondary)
+                HStack(spacing: 8) {
+                    Text(thread.title).font(.lmHeadline).foregroundStyle(Theme.textPrimary).lineLimit(1)
+                    Spacer(minLength: 4)
+                    Text(shortDate(thread.date)).font(.lmCaption).foregroundStyle(Theme.textTertiary)
                 }
-                Text(thread.snippet).font(.caption).foregroundColor(.secondary).lineLimit(2)
+                Text(thread.snippet).font(.lmCallout).foregroundStyle(Theme.textSecondary).lineLimit(1)
+            }
+            if thread.unread {
+                Circle().fill(Theme.brand).frame(width: 8, height: 8)
             }
         }
-        .padding(.vertical, 4)
+        .padding(.horizontal, 12).padding(.vertical, 10)
+        .background(RoundedRectangle(cornerRadius: 10, style: .continuous).fill(selected ? Theme.brandSoft : .clear))
         .contentShape(Rectangle())
-    }
-
-    /// Empty list, or why it's empty (e.g. Messages access not allowed on the phone).
-    private func emptyHint(_ text: String) -> some View {
-        VStack(spacing: 8) {
-            Spacer()
-            Image(systemName: "message").font(.system(size: 32)).foregroundColor(.secondary)
-            Text(text).font(.caption).foregroundColor(.secondary).multilineTextAlignment(.center)
-            Spacer()
-        }
-        .padding()
-        .frame(maxWidth: .infinity)
     }
 
     private var conversation: some View {
         VStack(spacing: 0) {
-            HStack {
+            HStack(spacing: 12) {
                 if let thread = openThread {
+                    ContactAvatar(name: thread.title)
                     VStack(alignment: .leading, spacing: 1) {
-                        Text(thread.title).font(.headline)
+                        Text(thread.title).font(.lmHeadline).foregroundStyle(Theme.textPrimary)
                         if !thread.name.isEmpty {
-                            Text(thread.address).font(.caption).foregroundColor(.secondary)
+                            Text(thread.address).font(.lmCallout).foregroundStyle(Theme.textSecondary)
                         }
                     }
+                    Spacer()
+                    IconButton(symbol: "phone", help: "Call \(thread.title) from your phone") { phone.dial(thread.address) }
                 } else {
-                    Text("To:").foregroundColor(.secondary)
-                    TextField("Phone number", text: $newRecipient)
-                        .textFieldStyle(.roundedBorder)
-                        .frame(maxWidth: 260)
+                    Text("To:").font(.lmBody).foregroundStyle(Theme.textSecondary)
+                    TextField("Phone number", text: $newRecipient).textFieldStyle(LMTextFieldStyle()).frame(maxWidth: 260)
+                    Spacer()
                 }
-                Spacer()
             }
-            .padding(14)
-            Divider()
+            .padding(.leading, 20).padding(.trailing, 14)
+            .frame(height: 60)
+            Hairline()
 
             ScrollViewReader { proxy in
                 ScrollView {
                     LazyVStack(spacing: 8) {
-                        ForEach(phone.messages) { bubble($0).id($0.id) }
+                        ForEach(Array(phone.messages.enumerated()), id: \.element.id) { index, message in
+                            if index == 0 || !Calendar.current.isDate(message.date, inSameDayAs: phone.messages[index - 1].date) {
+                                Text(message.date.formatted(.dateTime.weekday(.wide).day().month().hour().minute()))
+                                    .font(.lmCaption).foregroundStyle(Theme.textTertiary)
+                                    .padding(.vertical, 6)
+                            }
+                            bubble(message).id(message.id)
+                        }
                     }
-                    .padding(16)
+                    .padding(.horizontal, 24).padding(.vertical, 20)
                 }
                 .onChange(of: phone.messages.last?.id) {
                     if let last = phone.messages.last?.id { proxy.scrollTo(last, anchor: .bottom) }
@@ -117,90 +159,104 @@ struct MessagesView: View {
             }
 
             if let error = phone.smsError, !phone.threads.isEmpty {
-                Text(error).font(.caption).foregroundColor(.red).padding(.horizontal)
+                Text(error).font(.lmCallout).foregroundStyle(Theme.danger).padding(.horizontal, 20).padding(.bottom, 8)
             }
-            Divider()
-            HStack {
-                TextField("Text message", text: $draft, axis: .vertical)
-                    .textFieldStyle(.roundedBorder)
-                    .lineLimit(1...4)
-                    .onSubmit(sendDraft)
-                Button("Send", action: sendDraft)
-                    .buttonStyle(.borderedProminent)
-                    .disabled(recipient.isEmpty || draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+            Hairline()
+            HStack(spacing: 10) {
+                HStack(spacing: 8) {
+                    TextField("Text message", text: $draft, axis: .vertical)
+                        .textFieldStyle(.plain).font(.lmBody).lineLimit(1...4)
+                        .onSubmit(sendDraft)
+                    Text("SMS").font(.lmCaption).foregroundStyle(Theme.textTertiary)
+                }
+                .padding(.leading, 16).padding(.trailing, 14).padding(.vertical, 9)
+                .background(RoundedRectangle(cornerRadius: 18, style: .continuous).fill(Theme.surfaceMuted))
+                Button(action: sendDraft) {
+                    Image(systemName: "paperplane.fill").font(.system(size: 14, weight: .semibold)).foregroundStyle(Theme.onBrand)
+                        .frame(width: 36, height: 36)
+                        .background(Circle().fill(Theme.brand))
+                }
+                .buttonStyle(.plain)
+                .disabled(cannotSend)
+                .opacity(cannotSend ? 0.45 : 1)
+                .help("Send")
             }
-            .padding(12)
+            .padding(.horizontal, 16).padding(.vertical, 12)
         }
+    }
+
+    private var cannotSend: Bool {
+        recipient.isEmpty || draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
 
     private func bubble(_ message: PhoneFeatures.SmsMessage) -> some View {
         HStack {
-            if !message.incoming { Spacer(minLength: 60) }
-            VStack(alignment: message.incoming ? .leading : .trailing, spacing: 2) {
-                Text(message.body)
-                    .textSelection(.enabled)
-                    .padding(.horizontal, 12)
-                    .padding(.vertical, 8)
-                    .background(RoundedRectangle(cornerRadius: 14)
-                        .fill(message.incoming ? Color.secondary.opacity(0.15) : Color.accentColor))
-                    .foregroundColor(message.incoming ? .primary : .white)
-                Text(message.date, format: .dateTime.hour().minute())
-                    .font(.caption2)
-                    .foregroundColor(.secondary)
-            }
-            if message.incoming { Spacer(minLength: 60) }
+            if !message.incoming { Spacer(minLength: 80) }
+            Text(message.body)
+                .font(.lmBody)
+                .textSelection(.enabled)
+                .foregroundStyle(message.incoming ? Theme.textPrimary : Theme.onBrand)
+                .padding(.horizontal, 14).padding(.vertical, 8)
+                .background(RoundedRectangle(cornerRadius: 18, style: .continuous).fill(message.incoming ? Theme.surfaceMuted : Theme.brand))
+                .frame(maxWidth: 380, alignment: message.incoming ? .leading : .trailing)
+                .help(message.date.formatted(date: .abbreviated, time: .shortened))
+            if message.incoming { Spacer(minLength: 80) }
         }
     }
 
     private func sendDraft() {
-        guard !recipient.isEmpty else { return }
+        guard !cannotSend else { return }
         phone.sendSms(to: recipient, body: draft)
         draft = ""
     }
 }
 
-// MARK: - Calls
+// MARK: - Calls (Figma: Mac · Calls)
 
 struct CallsView: View {
     @ObservedObject var phone: PhoneFeatures
     @State private var number = ""
 
     var body: some View {
-        VStack(spacing: 0) {
-            HStack {
-                VStack(alignment: .leading, spacing: 2) {
-                    Text("Calls").font(.title2.bold())
-                    Text("Answer, decline and dial from your Mac. Call audio stays on the phone: use its speaker or a Bluetooth headset.")
-                        .font(.caption)
-                        .foregroundColor(.secondary)
-                }
-                Spacer()
-                Button { phone.refreshCalls() } label: { Label("Refresh", systemImage: "arrow.clockwise") }
-                    .buttonStyle(.bordered)
-            }
-            .padding(.horizontal, 20)
-            .padding(.vertical, 14)
-            Divider()
-
-            ScrollView {
-                VStack(alignment: .leading, spacing: 16) {
+        ScrollView {
+            HStack(alignment: .top, spacing: 20) {
+                VStack(alignment: .leading, spacing: 14) {
                     callCard
-                    HStack {
-                        TextField("Phone number", text: $number)
-                            .textFieldStyle(.roundedBorder)
-                            .onSubmit { phone.dial(number) }
-                        Button { phone.dial(number) } label: { Label("Call", systemImage: "phone.fill") }
-                            .buttonStyle(.borderedProminent)
-                            .tint(.green)
-                            .disabled(number.isEmpty)
+                    HStack(spacing: 6) {
+                        Image(systemName: "iphone").font(.system(size: 12)).foregroundStyle(Theme.textTertiary)
+                        Text("Answering here picks up on your phone. Call audio stays on the phone.")
+                            .font(.lmCallout).foregroundStyle(Theme.textTertiary)
                     }
                     if let error = phone.callError {
-                        Text(error).font(.caption).foregroundColor(.red)
+                        Text(error).font(.lmCallout).foregroundStyle(Theme.danger)
                     }
-                    Text("Recent").font(.headline)
-                    ForEach(phone.recentCalls) { recentRow($0) }
+                    HStack(spacing: 8) {
+                        Text("Recent").font(.lmTitle).tracking(-0.1).foregroundStyle(Theme.textPrimary)
+                        if !phone.recentCalls.isEmpty {
+                            Text("Last \(phone.recentCalls.count) calls").font(.lmCallout).foregroundStyle(Theme.textTertiary)
+                        }
+                    }
+                    .padding(.top, 6)
+                    if phone.recentCalls.isEmpty {
+                        Text("Calls on your phone show up here.").font(.lmCallout).foregroundStyle(Theme.textSecondary)
+                    } else {
+                        VStack(spacing: 0) {
+                            ForEach(phone.recentCalls) { recentRow($0) }
+                        }
+                        .padding(.vertical, 4)
+                        .lmCard(padding: 0)
+                    }
                 }
-                .padding(20)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                dialer.frame(width: 300)
+            }
+            .padding(.horizontal, 24).padding(.vertical, 20)
+        }
+        .navigationTitle("Calls")
+        .navigationSubtitle("Placed and answered by your phone")
+        .toolbar {
+            ToolbarItem(placement: .primaryAction) {
+                IconButton(symbol: "arrow.clockwise", help: "Refresh") { phone.refreshCalls() }
             }
         }
         .onAppear { if phone.recentCalls.isEmpty { phone.refreshCalls() } }
@@ -211,120 +267,264 @@ struct CallsView: View {
         case .idle:
             EmptyView()
         case .ringing(let caller):
-            HStack {
-                VStack(alignment: .leading) {
-                    Text("Incoming call").font(.caption).foregroundColor(.secondary)
-                    Text(caller).font(.title3.bold())
-                }
-                Spacer()
-                Button(action: phone.decline) { Label("Decline", systemImage: "phone.down.fill") }
-                    .buttonStyle(.borderedProminent)
-                    .tint(.red)
-                Button(action: phone.answer) { Label("Answer", systemImage: "phone.fill") }
-                    .buttonStyle(.borderedProminent)
-                    .tint(.green)
+            liveCall(caller: caller, status: "Incoming call · ringing on your phone") {
+                roundButton("Decline", symbol: "phone.down.fill", color: Theme.callRed, action: phone.decline)
+                roundButton("Answer", symbol: "phone.fill", color: Theme.callGreen, action: phone.answer)
             }
-            .padding(14)
-            .background(RoundedRectangle(cornerRadius: 12).fill(Color.green.opacity(0.12)))
         case .active(let caller):
-            HStack {
-                VStack(alignment: .leading) {
-                    Text("On a call (audio on the phone)").font(.caption).foregroundColor(.secondary)
-                    Text(caller.isEmpty ? "Call in progress" : caller).font(.title3.bold())
-                }
-                Spacer()
-                Button(action: phone.endCall) { Label("End", systemImage: "phone.down.fill") }
-                    .buttonStyle(.borderedProminent)
-                    .tint(.red)
+            liveCall(caller: caller.isEmpty ? "Call in progress" : caller, status: "On a call · audio is on your phone") {
+                roundButton("End", symbol: "phone.down.fill", color: Theme.callRed, action: phone.endCall)
             }
-            .padding(14)
-            .background(RoundedRectangle(cornerRadius: 12).fill(Color.secondary.opacity(0.1)))
         }
+    }
+
+    private func liveCall<Buttons: View>(caller: String, status: String, @ViewBuilder buttons: () -> Buttons) -> some View {
+        HStack(spacing: 14) {
+            Text(String(caller.first(where: \.isLetter) ?? "#").uppercased())
+                .font(.system(size: 18, weight: .semibold)).foregroundStyle(.white)
+                .frame(width: 48, height: 48).background(Circle().fill(.white.opacity(0.22)))
+            VStack(alignment: .leading, spacing: 2) {
+                Text(caller).font(.lmLargeTitle).tracking(-0.4).foregroundStyle(.white).lineLimit(1)
+                Text(status).font(.lmBody).foregroundStyle(.white.opacity(0.85))
+            }
+            Spacer(minLength: 8)
+            buttons()
+        }
+        .padding(.horizontal, 20).padding(.vertical, 16)
+        .background(Theme.gradient, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+        .shadow(color: Color(red: 0.31, green: 0.36, blue: 1).opacity(0.25), radius: 12, y: 10)
+    }
+
+    private func roundButton(_ title: String, symbol: String, color: Color, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            VStack(spacing: 4) {
+                Image(systemName: symbol).font(.system(size: 17, weight: .semibold)).foregroundStyle(.white)
+                    .frame(width: 44, height: 44).background(Circle().fill(color)).shadow(color: .black.opacity(0.2), radius: 3, y: 2)
+                Text(title).font(.lmCaption).foregroundStyle(.white.opacity(0.92))
+            }
+        }
+        .buttonStyle(.plain)
     }
 
     private func recentRow(_ call: PhoneFeatures.RecentCall) -> some View {
-        HStack(spacing: 12) {
-            Image(systemName: call.kind == "outgoing" ? "phone.arrow.up.right" : call.kind == "missed" ? "phone.arrow.down.left.fill" : "phone.arrow.down.left")
-                .foregroundColor(call.kind == "missed" || call.kind == "declined" ? .red : .secondary)
-                .frame(width: 20)
-            VStack(alignment: .leading, spacing: 2) {
-                Text(call.title).font(.subheadline.bold()).foregroundColor(call.kind == "missed" ? .red : .primary)
-                Text("\(call.date.formatted(date: .abbreviated, time: .shortened))\(call.durationSec > 0 ? " • \(Duration.seconds(call.durationSec).formatted(.time(pattern: .minuteSecond)))" : "")")
-                    .font(.caption)
-                    .foregroundColor(.secondary)
+        let missed = call.kind == "missed"
+        let symbol: String = {
+            switch call.kind {
+            case "outgoing": return "phone.arrow.up.right"
+            case "missed": return "phone.arrow.down.left"
+            case "declined": return "phone.down"
+            default: return "phone.arrow.down.left"
+            }
+        }()
+        return HStack(spacing: 12) {
+            IconTile(symbol: symbol, size: 32, radius: 9, iconSize: 14,
+                     background: missed ? Theme.dangerSoft : Theme.surfaceMuted,
+                     foreground: missed ? Theme.danger : call.kind == "declined" ? Theme.textTertiary : Theme.textSecondary)
+            VStack(alignment: .leading, spacing: 1) {
+                Text(call.title).font(.lmHeadline).foregroundStyle(missed ? Theme.danger : Theme.textPrimary).lineLimit(1)
+                Text("\(call.kind.capitalized) · \(shortDate(call.date))").font(.lmCallout).foregroundStyle(Theme.textSecondary)
             }
             Spacer()
+            if call.durationSec > 0 {
+                Text(Duration.seconds(call.durationSec).formatted(.time(pattern: .minuteSecond)))
+                    .font(.lmCallout).foregroundStyle(Theme.textTertiary).monospacedDigit()
+            }
             if !call.number.isEmpty {
-                Button { phone.dial(call.number) } label: { Image(systemName: "phone.fill") }
-                    .buttonStyle(.borderless)
-                    .help("Call back")
+                Button { phone.dial(call.number) } label: {
+                    Image(systemName: "phone.fill").font(.system(size: 12)).foregroundStyle(Theme.brand)
+                        .frame(width: 28, height: 28).background(Circle().fill(Theme.brandSoft))
+                }
+                .buttonStyle(.plain)
+                .help("Call back")
             }
         }
-        .padding(.vertical, 4)
+        .padding(.horizontal, 12).padding(.vertical, 10)
+    }
+
+    private var dialer: some View {
+        VStack(spacing: 14) {
+            Text("Dial a number").font(.lmHeadline).foregroundStyle(Theme.textSecondary)
+            HStack(spacing: 6) {
+                Color.clear.frame(width: 28, height: 28)
+                TextField("Number", text: $number)
+                    .textFieldStyle(.plain).font(.lmKeypad).multilineTextAlignment(.center)
+                    .onSubmit { if !number.isEmpty { phone.dial(number) } }
+                IconButton(symbol: "delete.left", help: "Delete") { if !number.isEmpty { number.removeLast() } }
+                    .disabled(number.isEmpty)
+            }
+            VStack(spacing: 10) {
+                ForEach([["1", "2", "3"], ["4", "5", "6"], ["7", "8", "9"], ["*", "0", "#"]], id: \.self) { row in
+                    HStack(spacing: 14) {
+                        ForEach(row, id: \.self) { digit in
+                            KeypadKey(digit: digit, letters: Self.letters[digit] ?? "") { number.append(digit) }
+                        }
+                    }
+                }
+            }
+            Button { phone.dial(number) } label: {
+                Label("Call", systemImage: "phone.fill").font(.lmHeadline).foregroundStyle(.white)
+                    .frame(maxWidth: .infinity).frame(height: 44)
+                    .background(Capsule().fill(Theme.callGreen))
+            }
+            .buttonStyle(.plain)
+            .disabled(number.isEmpty)
+            .opacity(number.isEmpty ? 0.5 : 1)
+            Text("Your phone places the call.").font(.lmCaption).foregroundStyle(Theme.textTertiary)
+        }
+        .padding(20)
+        .lmCard(padding: 0, radius: 16)
+    }
+
+    private static let letters = ["2": "ABC", "3": "DEF", "4": "GHI", "5": "JKL", "6": "MNO", "7": "PQRS", "8": "TUV", "9": "WXYZ", "0": "+"]
+}
+
+/// One dial-pad key (Figma Mac/Keypad key).
+private struct KeypadKey: View {
+    let digit: String
+    let letters: String
+    let action: () -> Void
+    var body: some View {
+        Button(action: action) {
+            VStack(spacing: 0) {
+                Text(digit).font(.lmKeypad).foregroundStyle(Theme.textPrimary)
+                Text(letters).font(.lmCaption).foregroundStyle(Theme.textTertiary).frame(height: 13)
+            }
+            .frame(width: 64, height: 52)
+            .background(RoundedRectangle(cornerRadius: 12, style: .continuous).fill(Theme.surfaceMuted))
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
     }
 }
 
-// MARK: - Phone screen (mirroring + mouse/keyboard control)
+// MARK: - Phone screen: mirroring + mouse/keyboard control (Figma: Mac · Phone Screen)
 
 struct PhoneScreenView: View {
     @ObservedObject var phone: PhoneFeatures
 
     var body: some View {
-        VStack(spacing: 0) {
-            HStack {
-                VStack(alignment: .leading, spacing: 2) {
-                    Text("Phone Screen").font(.title2.bold())
-                    Text("Click to tap, drag to swipe, scroll to scroll, and type to enter text. Esc is Back.")
-                        .font(.caption)
-                        .foregroundColor(.secondary)
-                }
-                Spacer()
-                if phone.isMirroring || phone.mirrorRequested {
-                    Button(action: phone.stopMirroring) { Label("Stop", systemImage: "stop.fill") }
-                        .buttonStyle(.bordered)
+        HStack(alignment: .center, spacing: 32) {
+            mirroredPhone
+            controls.frame(width: 360)
+        }
+        .padding(.horizontal, 32).padding(.vertical, 24)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .navigationTitle("Phone Screen")
+        .toolbar {
+            ToolbarItemGroup(placement: .primaryAction) {
+                if phone.isMirroring {
+                    StatusChip(tone: .success, label: "Mirroring")
+                    Button("Stop Mirroring", action: phone.stopMirroring).buttonStyle(.lmSecondary)
+                } else if phone.mirrorRequested {
+                    StatusChip(tone: .warning, label: "Waiting for your OK on the phone")
+                    Button("Cancel", action: phone.stopMirroring).buttonStyle(.lmSecondary)
                 } else {
-                    Button(action: phone.startMirroring) { Label("Start Mirroring", systemImage: "play.rectangle.fill") }
-                        .buttonStyle(.borderedProminent)
+                    Button("Start Mirroring", action: phone.startMirroring).buttonStyle(.lmPrimary)
                 }
             }
-            .padding(.horizontal, 20)
-            .padding(.vertical, 14)
-            Divider()
+        }
+    }
 
-            ZStack {
-                Color.black
+    private var mirroredPhone: some View {
+        let ratio = phone.screenFrame.map { ($0.size.width + 16) / ($0.size.height + 16) } ?? 300.0 / 640.0
+        return ZStack {
+            RoundedRectangle(cornerRadius: 42, style: .continuous).fill(Color(red: 0.04, green: 0.045, blue: 0.07))
+            RoundedRectangle(cornerRadius: 42, style: .continuous).strokeBorder(Color(white: 0.2), lineWidth: 2)
+            Group {
                 if let frame = phone.screenFrame {
                     Image(nsImage: frame)
                         .resizable()
                         .scaledToFit()
                         .overlay(PhoneInputSurface(imageSize: frame.size, phone: phone))
                 } else {
-                    VStack(spacing: 8) {
-                        Image(systemName: "iphone.gen3").font(.system(size: 40)).foregroundColor(.gray)
-                        Text(phone.mirrorRequested ? "Approve “Start now” on your phone…" : "Start mirroring to see your phone here.")
-                            .foregroundColor(.gray)
+                    VStack(spacing: 10) {
+                        Image(systemName: "iphone").font(.system(size: 30, weight: .light)).foregroundStyle(.white.opacity(0.5))
+                        Text(phone.mirrorRequested ? "Tap “Start now” on your phone…" : "Start mirroring to see your phone here.")
+                            .font(.lmCallout).foregroundStyle(.white.opacity(0.7)).multilineTextAlignment(.center)
+                        if !phone.mirrorRequested {
+                            Button("Start Mirroring", action: phone.startMirroring).buttonStyle(.lmPrimary).padding(.top, 4)
+                        }
+                    }
+                    .padding(24)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                }
+            }
+            .clipShape(RoundedRectangle(cornerRadius: 34, style: .continuous))
+            .padding(8)
+        }
+        .aspectRatio(ratio, contentMode: .fit)
+        .shadow(color: .black.opacity(0.25), radius: 24, y: 24)
+    }
+
+    private var controls: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            VStack(alignment: .leading, spacing: 12) {
+                HStack(spacing: 12) {
+                    IconTile(symbol: "cursorarrow", size: 36, radius: 10, iconSize: 16)
+                    VStack(alignment: .leading, spacing: 1) {
+                        Text("Mac Control").font(.lmHeadline).foregroundStyle(Theme.textPrimary)
+                        Text("Use this Mac’s mouse and keyboard on your phone").font(.lmCallout).foregroundStyle(Theme.textSecondary)
                     }
                 }
-            }
-
-            HStack(spacing: 14) {
-                Button { phone.global("back") } label: { Label("Back", systemImage: "chevron.backward") }
-                Button { phone.global("home") } label: { Label("Home", systemImage: "circle") }
-                Button { phone.global("recents") } label: { Label("Recents", systemImage: "square.on.square") }
-                Button { phone.global("notifications") } label: { Label("Notifications", systemImage: "bell") }
-                Spacer()
-                if let error = phone.mirrorError {
-                    Text(error).font(.caption).foregroundColor(.red)
-                } else if phone.controlEnabled == false {
-                    Text("To control the phone, turn on “LinkMyMac Mac Control” in the phone's Accessibility settings.")
-                        .font(.caption)
-                        .foregroundColor(.orange)
+                HStack(alignment: .top, spacing: 8) {
+                    Image(systemName: "keyboard").font(.system(size: 13)).foregroundStyle(Theme.textSecondary)
+                    Text("Click to tap, drag to swipe, scroll to scroll, and type to enter text. Esc is Back.")
+                        .font(.lmCallout).foregroundStyle(Theme.textSecondary).fixedSize(horizontal: false, vertical: true)
+                }
+                .padding(.horizontal, 12).padding(.vertical, 10)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background(RoundedRectangle(cornerRadius: 10, style: .continuous).fill(Theme.surfaceMuted))
+                switch phone.controlEnabled {
+                case true?: StatusChip(tone: .success, label: "Turned on in Accessibility on your phone")
+                case false?: StatusChip(tone: .warning, label: "Turn on “LinkMyMac Mac Control” in Accessibility")
+                case nil: EmptyView()
                 }
             }
-            .buttonStyle(.bordered)
-            .controlSize(.small)
-            .padding(12)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .lmCard(padding: 18)
+
+            VStack(alignment: .leading, spacing: 12) {
+                Text("Phone buttons").font(.lmHeadline).foregroundStyle(Theme.textPrimary)
+                HStack(spacing: 10) {
+                    toolButton("Back", symbol: "chevron.backward") { phone.global("back") }
+                    toolButton("Home", symbol: "circle") { phone.global("home") }
+                    toolButton("Recents", symbol: "square.on.square") { phone.global("recents") }
+                    toolButton("Alerts", symbol: "bell") { phone.global("notifications") }
+                }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .lmCard(padding: 18)
+
+            VStack(alignment: .leading, spacing: 10) {
+                Text("Stream").font(.lmHeadline).foregroundStyle(Theme.textPrimary)
+                KeyValueRow(key: "Resolution", value: phone.screenFrame.map { "\(Int($0.size.width)) × \(Int($0.size.height))" } ?? "—")
+                KeyValueRow(key: "Format", value: "JPEG frames")
+                KeyValueRow(key: "Who can see it", value: "Only this Mac")
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .lmCard(padding: 18)
+
+            if let error = phone.mirrorError {
+                Text(error).font(.lmCallout).foregroundStyle(Theme.danger)
+            }
+            HStack(spacing: 6) {
+                Image(systemName: "checkmark.shield").font(.system(size: 12)).foregroundStyle(Theme.textTertiary)
+                Text("Your phone asks for permission each time mirroring starts.").font(.lmCallout).foregroundStyle(Theme.textTertiary)
+            }
         }
+    }
+
+    private func toolButton(_ title: String, symbol: String, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            VStack(spacing: 6) {
+                Image(systemName: symbol).font(.system(size: 15, weight: .medium)).foregroundStyle(Theme.textPrimary)
+                Text(title).font(.lmCaption).foregroundStyle(Theme.textSecondary)
+            }
+            .frame(maxWidth: .infinity).frame(height: 64)
+            .background(RoundedRectangle(cornerRadius: 10, style: .continuous).fill(Theme.surfaceMuted))
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
     }
 }
 
@@ -415,61 +615,5 @@ final class PhoneInputNSView: NSView {
                 super.keyDown(with: event)
             }
         }
-    }
-}
-
-// MARK: - Sidebar pieces
-
-/// Phone network + hotspot button for the sidebar device card.
-struct PhoneStatusRow: View {
-    @ObservedObject var phone: PhoneFeatures
-
-    var body: some View {
-        HStack(spacing: 6) {
-            if !phone.network.isEmpty {
-                Text(phone.network).font(.caption2.bold())
-            }
-            if phone.signalLevel >= 0 {
-                Image(systemName: "cellularbars", variableValue: Double(phone.signalLevel) / 4)
-                    .font(.caption2)
-            }
-            Spacer()
-            Button(action: phone.requestHotspot) {
-                Label(phone.hotspotPrompted ? "Tap the prompt on your phone" : "Hotspot", systemImage: "personalhotspot")
-            }
-            .buttonStyle(.bordered)
-            .controlSize(.mini)
-            .help("Android doesn't let apps switch tethering on, so this puts a one-tap shortcut to Hotspot settings on the phone")
-        }
-    }
-}
-
-/// Live sidebar badges for Messages, Calls and Phone Screen.
-struct PhoneTabBadge: View {
-    @ObservedObject var phone: PhoneFeatures
-    let tab: DashboardTab
-
-    var body: some View {
-        switch tab {
-        case .messages:
-            let unread = phone.threads.filter(\.unread).count
-            if unread > 0 { capsule("\(unread)", .green) }
-        case .calls:
-            if case .ringing = phone.callState { capsule("RINGING", .green) }
-            else if case .active = phone.callState { capsule("ON CALL", .red) }
-        case .phoneScreen:
-            if phone.isMirroring { capsule("LIVE", .red) }
-        default:
-            EmptyView()
-        }
-    }
-
-    private func capsule(_ text: String, _ color: Color) -> some View {
-        Text(text)
-            .font(.system(size: 9, weight: .heavy))
-            .foregroundColor(.white)
-            .padding(.horizontal, 6)
-            .padding(.vertical, 2)
-            .background(Capsule().fill(color))
     }
 }

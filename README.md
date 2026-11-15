@@ -9,11 +9,36 @@ It's two apps that talk to each other:
 | App | Folder | Built with |
 |:---|:---|:---|
 | **LinkMyMac Companion** (Android 10+) | `android-app/` | Kotlin, a foreground service, `NotificationListenerService`, MediaStore, camera2 |
-| **UniBridge** (macOS 14+) | `macos-app/` | Swift 6, SwiftUI + AppKit, Network.framework, CryptoKit, AVKit |
+| **LinkMyMac** (macOS 14+) | `macos-app/` | Swift 6, SwiftUI + AppKit, Network.framework, CryptoKit, AVKit |
 
 [**Download the Android app (latest release)**](https://github.com/rohitrathia2/linkmymac/releases/latest) · [Wire protocol](protocol/WIRE_SPEC.md)
 
 ---
+
+## Design
+
+Both apps follow this Figma design (shown with sample data).
+
+| Mac · Overview | Mac · Pair a phone |
+|:---:|:---:|
+| <img src="docs/design/mac-overview.png" alt="Mac app, Overview tab"> | <img src="docs/design/mac-pairing.png" alt="Mac app, pairing screen"> |
+
+<details>
+<summary><b>All Mac tabs</b></summary>
+
+| Notifications | Photos | Videos |
+|:---:|:---:|:---:|
+| <img src="docs/design/mac-notifications.png" alt="Mac app, Notifications tab"> | <img src="docs/design/mac-photos.png" alt="Mac app, Photos tab"> | <img src="docs/design/mac-videos.png" alt="Mac app, Videos tab"> |
+| **Files** | **Messages** | **Calls** |
+| <img src="docs/design/mac-files.png" alt="Mac app, Files tab"> | <img src="docs/design/mac-messages.png" alt="Mac app, Messages tab"> | <img src="docs/design/mac-calls.png" alt="Mac app, Calls tab"> |
+| **Phone Screen** | **Camera** | **Clipboard** |
+| <img src="docs/design/mac-phone-screen.png" alt="Mac app, Phone Screen tab"> | <img src="docs/design/mac-camera.png" alt="Mac app, Camera tab"> | <img src="docs/design/mac-clipboard.png" alt="Mac app, Clipboard tab"> |
+
+</details>
+
+| Android · Pairing code | Android · Connected |
+|:---:|:---:|
+| <img src="docs/design/android-pairing.png" width="240" alt="Android app, pairing code"> | <img src="docs/design/android-connected.png" width="240" alt="Android app, connected to the Mac"> |
 
 ## Architecture
 
@@ -35,7 +60,7 @@ The diagram is generated with [archify](https://github.com/tt-a1i/archify) from 
 | Feature | Status | What it does |
 |:---|:---|:---|
 | **Notification mirroring + quick reply** | ✅ | Phone notifications appear as macOS banners and in the app. Reply inline or dismiss them from the Mac. |
-| **Universal clipboard (text)** | ✅ | Copy on one device, paste on the other. SHA-256 dedup stops copies from echoing back and forth. |
+| **Universal clipboard (text)** | ✅ | Copy on one device, paste on the other. SHA-256 dedup stops copies from echoing back and forth. Android 10+ blocks background clipboard reads, so a copy made on the phone reaches the Mac the next time you open LinkMyMac. Clips marked sensitive (password managers) are never sent. |
 | **Photos & Videos** | ✅ | Separate Photos and Videos sections, each paged and synced on its own. **Group by Folder** mirrors the phone's storage folders (Camera, Screenshots, WhatsApp…), with each folder collapsible. Download, share or delete from the Mac. |
 | **Video streaming** | ✅ | **Play** starts after the first few hundred KB. AVPlayer fetches only the byte ranges it needs, so seeking is instant and nothing waits for a full download. |
 | **File sharing, both ways** | ✅ | Mac → phone from the File Sharing tab, the Dock icon or the menu bar. Phone → Mac from **Share → LinkMyMac Companion** in any app, or **Send Files to Mac**. Any size, streamed in constant memory. |
@@ -88,17 +113,17 @@ Because the app is ad-hoc signed, macOS may ask again for Local Network, Downloa
 
 ## Getting started
 1. Start the phone app. For USB, also run `adb forward tcp:8765 tcp:8765`.
-2. Start UniBridge on the Mac. It finds the phone over Wi-Fi or USB.
-3. The Mac sidebar asks for a **pairing code**. Type the code shown in the phone app's status badge, or scan its QR code from the Mac's **QR Code Pairing** tab.
-4. Done. Notifications, clipboard and the gallery start syncing. Send files from the **File Sharing** tab, and browse **Photos** or **Videos** (try **Group by Folder**).
-5. For **Messages**, **Calls** and **Phone Screen**, open the phone app's **Messages, Calls & Mac Control** card:
-   - Tap **Allow Messages & Calls**.
-   - Tap **Turn On Mac Control**, then enable "LinkMyMac Mac Control".
+2. Start LinkMyMac on the Mac. It finds the phone over Wi-Fi or USB.
+3. The Mac asks for a **pairing code**. Type the 6-character code shown in the phone app, or click **Scan its QR code**.
+4. Done. Notifications, clipboard and the gallery start syncing. Send files from the **Files** tab, and browse **Photos** or **Videos** (try **By folder**).
+5. For **Messages**, **Calls** and **Phone Screen**, turn on these switches under **Shared with your Mac** in the phone app:
+   - **Messages & calls**, then allow the permissions it asks for.
+   - **Mac Control**, then enable "LinkMyMac Mac Control" in Accessibility settings.
 
 ## Use the phone camera in video calls
 The phone camera doesn't register as a system webcam yet, so call apps can't list it directly. Use OBS as a bridge:
-1. Install OBS Studio. In UniBridge, open **FaceTime Camera**, start the phone camera, and open the floating camera window.
-2. In OBS, add **macOS Screen Capture → Window → the UniBridge camera window**, then click **Start Virtual Camera**. The first time, allow it under System Settings → General → Login Items & Extensions → Camera Extensions.
+1. Install OBS Studio. In LinkMyMac, open **Camera**, click **Start camera**, then **Open floating window**.
+2. In OBS, add **macOS Screen Capture → Window → the LinkMyMac Camera window**, then click **Start Virtual Camera**. The first time, allow it under System Settings → General → Login Items & Extensions → Camera Extensions.
 3. In the call, choose **OBS Virtual Camera** for the phone or **FaceTime HD Camera** for the Mac:
    - FaceTime: Video → Camera
    - Zoom: the ^ next to Stop Video

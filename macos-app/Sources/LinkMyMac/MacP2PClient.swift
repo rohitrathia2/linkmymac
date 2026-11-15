@@ -1268,8 +1268,10 @@ public final class MacP2PClient: ObservableObject {
     public func sendFiles(_ urls: [URL]) {
         guard isPaired, let conn = connection else {
             for url in urls {
-                transfers.insert(FileTransfer(id: UUID().uuidString, name: url.lastPathComponent, direction: .toPhone,
-                                              totalBytes: 0, status: .failed("Phone not connected")), at: 0)
+                var row = FileTransfer(id: UUID().uuidString, name: url.lastPathComponent, direction: .toPhone,
+                                       totalBytes: 0, status: .failed("Phone not connected"))
+                row.localURL = url // lets the Files tab offer Retry
+                transfers.insert(row, at: 0)
             }
             return
         }
@@ -1278,6 +1280,7 @@ public final class MacP2PClient: ObservableObject {
             let values = try? url.resourceValues(forKeys: [.isDirectoryKey, .fileSizeKey])
             var row = FileTransfer(id: UUID().uuidString, name: url.lastPathComponent, direction: .toPhone,
                                    totalBytes: Int64(values?.fileSize ?? 0))
+            row.localURL = url // source file: Retry and Show in Finder
             if values?.isDirectory == true {
                 row.status = .failed("Folders aren't supported. Zip it first.") // ponytail: zip on the fly if asked
             } else {
@@ -1685,3 +1688,106 @@ extension NSImage {
         return rotatedImage
     }
 }
+
+#if DEBUG
+/// Sample content for checking screens against the Figma design. Debug builds only:
+/// run with `LINKMYMAC_PREVIEW=1` (or `=pairing`); no network is used.
+enum PreviewArt {
+    private static let palettes: [(UInt32, UInt32, UInt32)] = [
+        (0xFFB36B, 0xFF5E7E, 0xFFE6A8), (0x9ADCFF, 0x2F80ED, 0xFFFFFF), (0xC9F2D4, 0x5BBE83, 0x1F6B45),
+        (0x30307A, 0x0E0F2E, 0xFFF3C4), (0xFFE6AE, 0xF6A65C, 0xD27434), (0xFFE0EC, 0xFF8DB6, 0xFFFFFF),
+    ]
+    private static func color(_ hex: UInt32) -> NSColor {
+        NSColor(srgbRed: CGFloat((hex >> 16) & 0xFF) / 255, green: CGFloat((hex >> 8) & 0xFF) / 255, blue: CGFloat(hex & 0xFF) / 255, alpha: 1)
+    }
+    /// A gradient "landscape" PNG, standing in for a photo or video frame.
+    static func thumbnail(_ index: Int, width: Int = 320, height: Int = 320) -> Data? {
+        let (top, bottom, accent) = palettes[index % palettes.count]
+        guard let rep = NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: width, pixelsHigh: height, bitsPerSample: 8,
+                                         samplesPerPixel: 4, hasAlpha: true, isPlanar: false, colorSpaceName: .deviceRGB,
+                                         bytesPerRow: 0, bitsPerPixel: 0) else { return nil }
+        NSGraphicsContext.saveGraphicsState()
+        NSGraphicsContext.current = NSGraphicsContext(bitmapImageRep: rep)
+        let rect = NSRect(x: 0, y: 0, width: width, height: height)
+        NSGradient(starting: color(top), ending: color(bottom))?.draw(in: rect, angle: -90)
+        color(accent).setFill()
+        let d = CGFloat(min(width, height)) * 0.34
+        NSBezierPath(ovalIn: NSRect(x: rect.midX - d / 2, y: rect.midY - d * 0.2, width: d, height: d)).fill()
+        (color(bottom).blended(withFraction: 0.45, of: .black) ?? .black).setFill()
+        NSBezierPath(ovalIn: NSRect(x: -rect.width * 0.3, y: -rect.height * 0.55, width: rect.width * 1.6, height: rect.height * 0.9)).fill()
+        NSGraphicsContext.restoreGraphicsState()
+        return rep.representation(using: .png, properties: [:])
+    }
+}
+
+extension MacP2PClient {
+    static var previewMode: String? { ProcessInfo.processInfo.environment["LINKMYMAC_PREVIEW"] }
+
+    /// Fills the UI with sample data (no network) so screens can be checked against the design.
+    func loadPreviewData(paired: Bool) {
+        stopDiscovery()
+        isPaired = paired
+        needsPairingCode = !paired
+        connectedDeviceName = paired ? "Pixel 8 Pro" : nil
+        isWirelessConnection = true
+        connectionState = paired ? "Connected" : "Waiting for code"
+        discoveredPeers = [DiscoveredPeer(id: "preview", name: "Pixel 8 Pro", endpoint: .hostPort(host: "192.168.1.24", port: 8765))]
+        guard paired else { return }
+        remoteBatteryPercent = 82
+        let now = Int64(Date().timeIntervalSince1970 * 1000)
+        func action(_ id: String, _ title: String, reply: Bool = false) -> NotificationActionOption {
+            NotificationActionOption(id: id, title: title, supportsInlineReply: reply, replyPlaceholder: reply ? "Reply" : "")
+        }
+        notifications = [
+            MirroredNotification(id: "n1", appName: "Messages", packageName: "messages", title: "Alex Chen", body: "Running 10 min late, sorry!",
+                                 postTimeMs: now - 120_000, appIconData: nil, actions: [action("reply", "Reply", reply: true), action("read", "Mark as read")]),
+            MirroredNotification(id: "n2", appName: "Calendar", packageName: "calendar", title: "Team standup in 10 minutes", body: "10:30 – 10:45 AM · Video call",
+                                 postTimeMs: now - 480_000, appIconData: nil, actions: [action("snooze", "Snooze"), action("dismiss", "Dismiss")]),
+            MirroredNotification(id: "n3", appName: "Mail", packageName: "mail", title: "Priya Sharma",
+                                 body: "Slides for Thursday — here’s the deck we talked about. Let me know if the numbers in the last section look right before I send it to the team.",
+                                 postTimeMs: now - 1_500_000, appIconData: nil, actions: [action("archive", "Archive")]),
+            MirroredNotification(id: "n4", appName: "Parcel", packageName: "parcel", title: "Out for delivery", body: "Your parcel arrives today between 2 and 6 PM.",
+                                 postTimeMs: now - 3_600_000, appIconData: nil, actions: []),
+        ]
+        mediaTotals = [.photos: 2481, .videos: 164]
+        var items: [RemoteMediaItem] = []
+        let folders = [("Camera", "DCIM/Camera/"), ("Screenshots", "Pictures/Screenshots/"), ("Pictures", "Pictures/")]
+        for i in 0..<18 {
+            var item = RemoteMediaItem(id: "p\(i)", displayName: "IMG_20261115_\(1000 + i).jpg", mimeType: "image/jpeg",
+                                       sizeBytes: 3_400_000, width: 4000, height: 3000, thumbnailData: PreviewArt.thumbnail(i))
+            let folder = folders[i < 12 ? 0 : i < 14 ? 1 : 2]
+            item.folderName = folder.0
+            item.folderPath = folder.1
+            items.append(item)
+        }
+        for (i, video) in [("Sunset walk.mp4", 225_000), ("Beach day.mp4", 42_000), ("City lights.mp4", 78_000), ("Forest trail.mp4", 726_000), ("Garden.mp4", 9_000)].enumerated() {
+            var item = RemoteMediaItem(id: "v\(i)", displayName: video.0, mimeType: "video/mp4", sizeBytes: 148_000_000,
+                                       width: 1920, height: 1080, thumbnailData: PreviewArt.thumbnail(i, width: 320, height: 180))
+            item.durationMs = Int64(video.1)
+            item.folderName = "Camera"
+            item.folderPath = "DCIM/Camera/"
+            items.append(item)
+        }
+        mediaItems = items
+        var sending = FileTransfer(id: "t1", name: "Trip itinerary.pdf", direction: .toPhone, totalBytes: 18_000_000)
+        sending.bytesTransferred = 12_200_000
+        var sent = FileTransfer(id: "t2", name: "Boarding pass.pdf", direction: .toPhone, totalBytes: 1_200_000)
+        sent.status = .done
+        var failed = FileTransfer(id: "t3", name: "Screen recording.mov", direction: .toPhone, totalBytes: 240_000_000)
+        failed.status = .failed("Phone could not create the file")
+        failed.localURL = URL(fileURLWithPath: "/tmp/Screen recording.mov")
+        var keynote = FileTransfer(id: "t4", name: "Q4 review.key", direction: .toPhone, totalBytes: 48_000_000)
+        keynote.status = .done
+        var received = FileTransfer(id: "t5", name: "Invoice 0425.pdf", direction: .fromPhone, totalBytes: 220_000)
+        received.bytesTransferred = 220_000
+        received.status = .done
+        transfers = [sending, sent, failed, keynote, received]
+        lastSyncedClipboardText = "Order #48213 · pick up after 5 PM"
+        clipboardSyncHistory = ["Order #48213 · pick up after 5 PM", "Meet at the café on the 2nd floor — table by the window."]
+        isCameraStreaming = true
+        currentCameraLens = "BACK"
+        latestCameraFrame = PreviewArt.thumbnail(2, width: 640, height: 480).flatMap { NSImage(data: $0) }
+        phone.loadPreviewData()
+    }
+}
+#endif
