@@ -89,6 +89,9 @@ public struct RemoteMediaItem: Identifiable, Sendable {
     public let height: Int
     public let thumbnailData: Data?
     public var durationMs: Int64 = 0
+    /// Android storage folder, e.g. "Camera" at "DCIM/Camera/" (for Group by Folder).
+    public var folderName: String = ""
+    public var folderPath: String = ""
 
     public var isVideo: Bool { mimeType.hasPrefix("video/") }
 }
@@ -894,7 +897,9 @@ public final class MacP2PClient: ObservableObject {
                     width: w,
                     height: h,
                     thumbnailData: thumbData,
-                    durationMs: (raw["durationMs"] as? NSNumber)?.int64Value ?? 0
+                    durationMs: (raw["durationMs"] as? NSNumber)?.int64Value ?? 0,
+                    folderName: raw["bucket"] as? String ?? "",
+                    folderPath: raw["relativePath"] as? String ?? ""
                 )
             )
         }

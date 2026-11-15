@@ -94,7 +94,9 @@ class MediaStoreProvider(private val context: Context) {
             MediaStore.Files.FileColumns.WIDTH,
             MediaStore.Files.FileColumns.HEIGHT,
             MediaStore.Files.FileColumns.MEDIA_TYPE,
-            MediaStore.MediaColumns.DURATION
+            MediaStore.MediaColumns.DURATION,
+            MediaStore.MediaColumns.BUCKET_DISPLAY_NAME, // folder name, e.g. "Camera"
+            MediaStore.MediaColumns.RELATIVE_PATH        // e.g. "DCIM/Camera/"
         )
 
         val sortOrder = "${MediaStore.Files.FileColumns.DATE_MODIFIED} DESC"
@@ -120,6 +122,8 @@ class MediaStoreProvider(private val context: Context) {
                     val heightCol = cursor.getColumnIndexOrThrow(MediaStore.Images.Media.HEIGHT)
                     val typeCol = cursor.getColumnIndexOrThrow(MediaStore.Files.FileColumns.MEDIA_TYPE)
                     val durationCol = cursor.getColumnIndexOrThrow(MediaStore.MediaColumns.DURATION)
+                    val bucketCol = cursor.getColumnIndexOrThrow(MediaStore.MediaColumns.BUCKET_DISPLAY_NAME)
+                    val pathCol = cursor.getColumnIndexOrThrow(MediaStore.MediaColumns.RELATIVE_PATH)
 
                     var fetched = 0
                     do {
@@ -147,6 +151,8 @@ class MediaStoreProvider(private val context: Context) {
                             put("displayName", cursor.getString(nameCol) ?: "Photo_$mediaId.jpg")
                             put("mimeType", cursor.getString(mimeCol) ?: if (isVideo) "video/mp4" else "image/jpeg")
                             put("durationMs", if (isVideo) cursor.getLong(durationCol) else 0L)
+                            put("bucket", cursor.getString(bucketCol) ?: "")
+                            put("relativePath", cursor.getString(pathCol) ?: "")
                             put("dateModifiedSec", cursor.getLong(dateCol))
                             put("sizeBytes", cursor.getLong(sizeCol))
                             put("width", cursor.getInt(widthCol))

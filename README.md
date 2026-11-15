@@ -65,7 +65,7 @@ The first time a Mac connects, the phone shows a 6-character code in its top sta
 |:---|:---|:---|
 | Notification mirroring + quick reply | ✅ | `NotificationListenerService` + `RemoteInput` → `UNUserNotificationCenter` |
 | Clipboard sync (text) | ✅ | `ClipboardManager` ⇄ `NSPasteboard`, SHA-256 dedup |
-| Photos and videos: browse, download, share, delete | ✅ | Separate Photos and Videos sections, each paged and synced on its own; videos play in AVKit after download |
+| Photos and videos: browse, play, download, share, delete | ✅ | Separate Photos and Videos sections, each paged on its own. **Group by Folder** mirrors the phone's storage folders (Camera, Screenshots, WhatsApp…). **Play** fetches a video and plays it in AVKit |
 | File sharing, both directions | ✅ | Mac: File Sharing tab (drop zone), Dock icon, menu bar. Android: Share → LinkMyMac Companion, or "Send Files to Mac" |
 | Phone camera on the Mac | ✅ in-app only | camera2 JPEG frames shown in the app; it is not a system webcam (no CMIO extension) |
 | Mac "Now Playing" controls on the phone | ✅ | Media notification on Android |
@@ -89,6 +89,7 @@ The first time a Mac connects, the phone shows a 6-character code in its top sta
 - Notification access and foreground service: the bridge itself.
 - All-files access (`MANAGE_EXTERNAL_STORAGE`): needed only so "Delete from Mac" can remove photos and videos made by other apps. Google Play restricts this permission. A Play build should switch to `MediaStore.createDeleteRequest`, which asks on the phone.
 - Camera: the phone-camera view.
+- Start at boot / after updates (`RECEIVE_BOOT_COMPLETED` + `MY_PACKAGE_REPLACED`): restarts the bridge without opening the app. On vivo, Xiaomi and similar phones, also allow **Autostart** for LinkMyMac in the phone's settings, or the reboot case is blocked.
 - App names and icons for mirrored notifications use a `<queries>` filter for launcher apps instead of `QUERY_ALL_PACKAGES`.
 - No SMS, contacts or call permissions.
 

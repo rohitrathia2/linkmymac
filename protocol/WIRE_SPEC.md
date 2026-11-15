@@ -63,7 +63,7 @@ receiver → FILE_TRANSFER_RESULT   {transferId, ok, error?}
 | Mac → phone | `HEARTBEAT_PING` (every 5 s), `NOTIFICATIONS_SYNC_REQUEST`, `NOTIFICATION_ACTION`, `NOTIFICATION_DISMISS`, `NOTIFICATION_CLEAR_ALL`, `CLIPBOARD_EVENT`, `MEDIA_INDEX_REQUEST`, `MEDIA_DOWNLOAD_REQUEST`, `MEDIA_DELETE_REQUEST`, `CAMERA_CONTROL`, `NOW_PLAYING_UPDATE`, `UNPAIR` |
 | Phone → Mac | `HEARTBEAT_PONG` (battery %), `NOTIFICATION_EVENT`, `CLIPBOARD_EVENT`, `MEDIA_INDEX_RESPONSE`, `MEDIA_GALLERY_UPDATED`, `MEDIA_DELETE_RESPONSE`, `CAMERA_FRAME`, `CAMERA_STREAM_STATUS`, `MEDIA_CONTROL_COMMAND` |
 
-**Gallery paging.** `MEDIA_INDEX_REQUEST {offset, limit, includeThumbnails, mediaType}` takes `mediaType` `"image"` or `"video"` so photos and videos page independently, newest first. Leaving it out pages both together. The response echoes `mediaType`, and its `totalCount` covers that type only. Videos include `durationMs`.
+**Gallery paging.** `MEDIA_INDEX_REQUEST {offset, limit, includeThumbnails, mediaType}` takes `mediaType` `"image"` or `"video"` so photos and videos page independently, newest first. Leaving it out pages both together. The response echoes `mediaType`, and its `totalCount` covers that type only. Videos include `durationMs`. Every item carries `bucket` (its folder, e.g. `Camera`) and `relativePath` (e.g. `DCIM/Camera/`), which the Mac uses for Group by Folder.
 
 ## 6. Not implemented yet
 - **TLS.** The QR payload already carries the phone's certificate fingerprint (`certFp`) for pinning, but the sockets don't use it. Until then, Wi-Fi traffic is readable by others on the network, and an active attacker could hijack a session. USB traffic stays off the network.

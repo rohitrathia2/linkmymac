@@ -1,6 +1,7 @@
 import SwiftUI
 import AppKit
 import AVKit
+import Combine
 @preconcurrency import AVFoundation
 import CoreImage
 import CoreMedia
@@ -119,6 +120,14 @@ struct LinkMyMacApp: App {
     }
 }
 
+/// One Android storage folder in "Group by Folder" mode.
+struct MediaFolder: Identifiable {
+    let path: String
+    let items: [RemoteMediaItem]
+    var id: String { path }
+    var name: String { items.first.map { $0.folderName.isEmpty ? "Other" : $0.folderName } ?? "Other" }
+}
+
 /**
  * -----------------------------------------------------------------------------
  * Navigation Tab Enum for Sidebar Selection
@@ -192,6 +201,8 @@ struct DashboardView: View {
     @State private var showDeleteConfirmation: Bool = false
     @State private var itemPendingDeletion: RemoteMediaItem? = nil
     @State private var previewMediaItem: RemoteMediaItem? = nil
+    @State private var previewAutoplay: Bool = false
+    @AppStorage("LinkMyMac.groupMediaByFolder") private var groupMediaByFolder = false
     @State private var notificationSearchText: String = ""
     @State private var photoSearchText: String = ""
     @State private var showFaceTimeGuide: Bool = false
@@ -212,7 +223,7 @@ struct DashboardView: View {
             FaceTimeIntegrationGuideSheet(isPresented: $showFaceTimeGuide, p2pClient: p2pClient)
         }
         .sheet(item: $previewMediaItem) { item in
-            PhotoDetailPreviewSheet(item: item, p2pClient: p2pClient)
+            PhotoDetailPreviewSheet(item: item, p2pClient: p2pClient, autoplay: previewAutoplay)
         }
         .confirmationDialog(
             itemPendingDeletion?.isVideo == true ? "Permanently Delete Video?" : "Permanently Delete Photo?",
@@ -744,6 +755,15 @@ struct DashboardView: View {
                 .background(Color.secondary.opacity(0.1))
                 .cornerRadius(8)
 
+                Button {
+                    groupMediaByFolder.toggle()
+                } label: {
+                    Label(groupMediaByFolder ? "Ungroup" : "Group by Folder",
+                          systemImage: groupMediaByFolder ? "square.grid.2x2" : "folder")
+                }
+                .buttonStyle(.bordered)
+                .help("Group by the folder each item is stored in on the phone (Camera, Screenshots, WhatsApp…)")
+
                 if p2pClient.syncingKind == kind {
                     HStack(spacing: 6) {
                         ProgressView().controlSize(.small)
@@ -801,15 +821,60 @@ struct DashboardView: View {
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else {
                 ScrollView {
-                    LazyVGrid(columns: [GridItem(.adaptive(minimum: 170, maximum: 220), spacing: 14)], spacing: 14) {
-                        ForEach(items) { item in
-                            mediaCard(item)
+                    LazyVGrid(columns: [GridItem(.adaptive(minimum: 170, maximum: 220), spacing: 14)], spacing: 14,
+                              pinnedViews: [.sectionHeaders]) {
+                        if groupMediaByFolder {
+                            ForEach(mediaFolders(items)) { folder in
+                                Section {
+                                    ForEach(folder.items) { item in
+                                        mediaCard(item)
+                                    }
+                                } header: {
+                                    folderHeader(folder)
+                                }
+                            }
+                        } else {
+                            ForEach(items) { item in
+                                mediaCard(item)
+                            }
                         }
                     }
                     .padding(16)
                 }
             }
         }
+    }
+
+    /// Folders ordered by their newest item (items arrive newest-first), like Android's album list.
+    private func mediaFolders(_ items: [RemoteMediaItem]) -> [MediaFolder] {
+        var order: [String] = []
+        var groups: [String: [RemoteMediaItem]] = [:]
+        for item in items {
+            if groups[item.folderPath] == nil { order.append(item.folderPath) }
+            groups[item.folderPath, default: []].append(item)
+        }
+        return order.map { MediaFolder(path: $0, items: groups[$0, default: []]) }
+    }
+
+    private func folderHeader(_ folder: MediaFolder) -> some View {
+        HStack(spacing: 8) {
+            Image(systemName: "folder.fill")
+                .foregroundColor(.accentColor)
+            Text(folder.name)
+                .font(.headline)
+            Text(folder.path)
+                .font(.caption)
+                .foregroundColor(.secondary)
+                .lineLimit(1)
+                .truncationMode(.middle)
+            Spacer()
+            Text("\(folder.items.count)")
+                .font(.caption.bold())
+                .foregroundColor(.secondary)
+        }
+        .padding(.vertical, 8)
+        .padding(.horizontal, 4)
+        .background(Color(NSColor.windowBackgroundColor)) // pinned header: hide cards scrolling under it
     }
 
     private func filteredMediaItems(_ kind: MediaKind) -> [RemoteMediaItem] {
@@ -849,9 +914,25 @@ struct DashboardView: View {
                             .padding(6)
                     }
                 }
+                .overlay {
+                    if item.isVideo {
+                        Button {
+                            previewAutoplay = true
+                            previewMediaItem = item
+                        } label: {
+                            Image(systemName: "play.circle.fill")
+                                .font(.system(size: 40))
+                                .symbolRenderingMode(.palette)
+                                .foregroundStyle(.white, .black.opacity(0.45))
+                        }
+                        .buttonStyle(.plain)
+                        .help("Play")
+                    }
+                }
                 .cornerRadius(10)
                 .contentShape(Rectangle())
                 .onTapGesture {
+                    previewAutoplay = false
                     previewMediaItem = item
                 }
 
@@ -1802,9 +1883,13 @@ struct DashboardView: View {
 struct PhotoDetailPreviewSheet: View {
     let item: RemoteMediaItem
     @ObservedObject var p2pClient: MacP2PClient
+    var autoplay = false
     @Environment(\.dismiss) private var dismiss
     /// Built once per downloaded video; making it inside `body` would restart playback on every re-render.
     @State private var player: AVPlayer?
+    /// Play was pressed before the video was on this Mac: start as soon as the download lands.
+    @State private var wantsPlayback = false
+    @State private var isPlaying = false
 
     private var download: FileTransfer? {
         p2pClient.transfers.first { $0.id == "media_\(item.id)" && $0.status == .inProgress }
@@ -1837,6 +1922,9 @@ struct PhotoDetailPreviewSheet: View {
                 if let player {
                     VideoPlayer(player: player)
                         .padding(8)
+                        .onReceive(player.publisher(for: \.timeControlStatus).receive(on: RunLoop.main)) {
+                            isPlaying = $0 == .playing // also follows AVKit's own controls
+                        }
                 } else if !item.isVideo,
                           let localUrl = p2pClient.localFileURL(for: item.id),
                           let img = NSImage(contentsOf: localUrl) {
@@ -1852,9 +1940,7 @@ struct PhotoDetailPreviewSheet: View {
                         .padding(8)
                         .overlay {
                             if item.isVideo {
-                                Image(systemName: "play.circle.fill")
-                                    .font(.system(size: 54))
-                                    .foregroundColor(.white.opacity(0.85))
+                                playOverlay
                             }
                         }
                 }
@@ -1863,12 +1949,23 @@ struct PhotoDetailPreviewSheet: View {
             .padding(.horizontal)
 
             HStack {
+                if item.isVideo {
+                    let downloading = player == nil && download != nil
+                    Button(action: togglePlayback) {
+                        Label(downloading ? "Downloading…" : (isPlaying ? "Pause" : "Play"),
+                              systemImage: isPlaying ? "pause.fill" : "play.fill")
+                            .frame(minWidth: 90)
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .disabled(downloading)
+                }
+
                 Button {
                     p2pClient.downloadFullResolutionMedia(mediaId: item.id)
                 } label: {
                     Label(item.isVideo ? "Download Video" : "Download Full Resolution", systemImage: "arrow.down.circle")
                 }
-                .buttonStyle(.borderedProminent)
+                .buttonStyle(.bordered)
                 .disabled(download != nil)
 
                 if let download {
@@ -1887,10 +1984,52 @@ struct PhotoDetailPreviewSheet: View {
         .frame(minWidth: 520, minHeight: 460)
         .task(id: p2pClient.localFileURL(for: item.id)) {
             if item.isVideo, let url = p2pClient.localFileURL(for: item.id) {
-                player = AVPlayer(url: url)
+                let newPlayer = AVPlayer(url: url)
+                player = newPlayer
+                if wantsPlayback { newPlayer.play() }
             }
         }
+        .onAppear { if autoplay { togglePlayback() } }
         .onDisappear { player?.pause() }
+    }
+
+    /// Big play button over the thumbnail; becomes a progress ring while the video downloads.
+    @ViewBuilder private var playOverlay: some View {
+        if let download {
+            ProgressView(value: Double(download.bytesTransferred), total: Double(max(download.totalBytes, 1)))
+                .progressViewStyle(.circular)
+                .controlSize(.large)
+                .tint(.white)
+        } else {
+            Button(action: togglePlayback) {
+                Image(systemName: "play.circle.fill")
+                    .font(.system(size: 54))
+                    .symbolRenderingMode(.palette)
+                    .foregroundStyle(.white, .black.opacity(0.45))
+            }
+            .buttonStyle(.plain)
+            .help("Play")
+        }
+    }
+
+    /// Play/pause. Until the video is on this Mac, downloads it and plays when it lands.
+    private func togglePlayback() {
+        guard let player else {
+            wantsPlayback = true
+            // The player may just not exist yet (it's made in .task); only fetch what isn't here.
+            if p2pClient.localFileURL(for: item.id) == nil, download == nil {
+                p2pClient.downloadFullResolutionMedia(mediaId: item.id)
+            }
+            return
+        }
+        if player.timeControlStatus == .playing {
+            player.pause()
+        } else {
+            if let current = player.currentItem, current.duration.isNumeric, current.currentTime() >= current.duration {
+                player.seek(to: .zero) // finished: play again from the start
+            }
+            player.play()
+        }
     }
 
     private func formatBytes(_ bytes: Int64) -> String {
@@ -2293,7 +2432,7 @@ struct FaceTimeIntegrationGuideSheet: View {
                                 .font(.headline)
                         }
 
-                        Text("Switch between your Mac's internal camera and your Android camera anytime during an active call:")
+                        Text("Switch cameras anytime during a call. Your Android camera appears in these menus as **OBS Virtual Camera** once option 3 is set up; your Mac's own camera is **FaceTime HD Camera**:")
                             .font(.caption)
                             .foregroundColor(.secondary)
 
