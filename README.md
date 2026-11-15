@@ -15,6 +15,31 @@ It's two apps that talk to each other:
 
 ---
 
+## Design
+
+Both apps follow this Figma design (shown with sample data).
+
+| Mac · Overview | Mac · Pair a phone |
+|:---:|:---:|
+| <img src="docs/design/mac-overview.png" alt="Mac app, Overview tab"> | <img src="docs/design/mac-pairing.png" alt="Mac app, pairing screen"> |
+
+<details>
+<summary><b>All Mac tabs</b></summary>
+
+| Notifications | Photos | Videos |
+|:---:|:---:|:---:|
+| <img src="docs/design/mac-notifications.png" alt="Mac app, Notifications tab"> | <img src="docs/design/mac-photos.png" alt="Mac app, Photos tab"> | <img src="docs/design/mac-videos.png" alt="Mac app, Videos tab"> |
+| **Files** | **Messages** | **Calls** |
+| <img src="docs/design/mac-files.png" alt="Mac app, Files tab"> | <img src="docs/design/mac-messages.png" alt="Mac app, Messages tab"> | <img src="docs/design/mac-calls.png" alt="Mac app, Calls tab"> |
+| **Phone Screen** | **Camera** | **Clipboard** |
+| <img src="docs/design/mac-phone-screen.png" alt="Mac app, Phone Screen tab"> | <img src="docs/design/mac-camera.png" alt="Mac app, Camera tab"> | <img src="docs/design/mac-clipboard.png" alt="Mac app, Clipboard tab"> |
+
+</details>
+
+| Android · Pairing code | Android · Connected |
+|:---:|:---:|
+| <img src="docs/design/android-pairing.png" width="240" alt="Android app, pairing code"> | <img src="docs/design/android-connected.png" width="240" alt="Android app, connected to the Mac"> |
+
 ## Architecture
 
 <picture>
