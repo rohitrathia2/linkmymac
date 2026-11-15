@@ -16,13 +16,20 @@ import android.net.nsd.NsdManager
 import android.net.nsd.NsdServiceInfo
 import android.os.BatteryManager
 import android.os.Build
+import android.Manifest
+import android.content.pm.PackageManager
 import android.os.Environment
+import android.os.Handler
 import android.os.IBinder
+import android.os.Looper
 import android.provider.MediaStore
+import android.provider.Settings
+import android.telephony.TelephonyManager
 import android.provider.OpenableColumns
 import android.util.Base64
 import android.util.Log
 import com.linkmymac.android.crypto.PairingManager
+import com.linkmymac.android.ui.MirrorConsentActivity
 import org.json.JSONObject
 import java.io.DataInputStream
 import java.io.DataOutputStream
@@ -75,6 +82,8 @@ class P2PDaemonService : Service() {
         private const val FILE_CHUNK_BYTES = 64 * 1024
         private const val RANGE_CHUNK_BYTES = 256 * 1024
         private const val FILES_CHANNEL_ID = "linkmymac_files"
+        private const val PROMPTS_CHANNEL_ID = "linkmymac_prompts"
+        private const val HOTSPOT_PROMPT_ID = 3002
 
         @Volatile
         var instance: P2PDaemonService? = null
@@ -122,6 +131,15 @@ class P2PDaemonService : Service() {
             activeClients.forEach { session ->
                 if (session.authenticated) session.sendFrame(FLAG_JSON_FRAME, payloadBytes)
             }
+        }
+
+        /** Blocking send to the first paired Mac: lets the screen encoder run at the link's pace. */
+        fun sendToMacBlocking(json: JSONObject): Boolean =
+            activeClients.firstOrNull { it.authenticated }?.sendNow(json) ?: false
+
+        /** After the person grants SMS / phone permissions in the app. */
+        fun onPermissionsChanged() {
+            instance?.startPhoneBridges()
         }
 
         /** After "Forget paired Macs": drop live sessions so they must pair again. */
@@ -174,6 +192,9 @@ class P2PDaemonService : Service() {
     private lateinit var mediaProvider: MediaStoreProvider
     private lateinit var cameraProvider: CameraStreamProvider
     private lateinit var mediaNotificationHelper: MediaNotificationHelper
+    private lateinit var smsBridge: SmsBridge
+    private lateinit var callBridge: CallBridge
+    private val mainHandler = Handler(Looper.getMainLooper())
 
     /**
      * -------------------------------------------------------------------------
@@ -195,6 +216,9 @@ class P2PDaemonService : Service() {
         mediaProvider = MediaStoreProvider(this)
         cameraProvider = CameraStreamProvider(this)
         mediaNotificationHelper = MediaNotificationHelper(this)
+        smsBridge = SmsBridge(this)
+        callBridge = CallBridge(this) { smsBridge.contactName(it) }
+        startPhoneBridges()
 
         startForegroundDaemonNotification()
         clipboardHelper.startMonitoring()
@@ -241,6 +265,9 @@ class P2PDaemonService : Service() {
         mediaProvider.stopObserving()
         cameraProvider.stopStream()
         mediaNotificationHelper.teardown()
+        smsBridge.stopObserving()
+        callBridge.stop()
+        ScreenMirrorService.stop(this)
         unregisterMdnsService()
         try { serverSocket?.close() } catch (_: Exception) {}
         activeClients.forEach { it.close() }
@@ -460,6 +487,7 @@ class P2PDaemonService : Service() {
                 onClientCountChanged?.invoke(connectedClientCount)
                 if (connectedClientCount == 0) {
                     cameraProvider.stopStream()
+                    ScreenMirrorService.stop(this@P2PDaemonService) // nobody left to watch
                 }
             }
         }
@@ -494,6 +522,43 @@ class P2PDaemonService : Service() {
             }
 
             when (frameType) {
+                // SMS (reads run off the socket thread: big inboxes take a moment)
+                "SMS_THREADS_REQUEST" -> ioExecutor.execute { startPhoneBridges(); sendJson(smsBridge.threads(json.optInt("limit", 60))) }
+                "SMS_MESSAGES_REQUEST" -> ioExecutor.execute {
+                    sendJson(smsBridge.messages(json.optLong("threadId"), json.optInt("limit", 200)))
+                }
+                "SMS_SEND" -> {
+                    val error = smsBridge.send(json.optString("address"), json.optString("body"))
+                    sendJson(JSONObject()
+                        .put("type", "SMS_SEND_RESULT")
+                        .put("requestId", json.optString("requestId"))
+                        .put("ok", error == null)
+                        .apply { error?.let { put("error", it) } })
+                }
+
+                // Calls (audio stays on the phone)
+                "CALL_ACTION" -> sendCallResult(callBridge.act(json.optString("action")))
+                "CALL_DIAL" -> sendCallResult(callBridge.dial(json.optString("number")))
+                "CALL_LOG_REQUEST" -> ioExecutor.execute { startPhoneBridges(); sendJson(callBridge.recent(json.optInt("limit", 100))) }
+
+                // Screen mirroring + mouse/keyboard control
+                "MIRROR_START" -> requestMirroring()
+                "MIRROR_STOP" -> ScreenMirrorService.stop(this@P2PDaemonService)
+                "INPUT_TAP", "INPUT_SWIPE", "INPUT_TEXT", "INPUT_KEY", "INPUT_GLOBAL" -> {
+                    val control = ControlService.instance
+                    if (control == null) {
+                        sendJson(JSONObject().put("type", "CONTROL_STATUS").put("enabled", false))
+                    } else {
+                        mainHandler.post { control.handle(json) }
+                    }
+                }
+
+                // Hotspot: apps can't switch tethering on, so ask the person with one tap
+                "HOTSPOT_REQUEST" -> {
+                    promptHotspot()
+                    sendJson(JSONObject().put("type", "HOTSPOT_RESULT").put("prompted", true))
+                }
+
                 // A paired Mac removes only itself (vs. "Forget Paired Macs", which drops all)
                 "UNPAIR" -> {
                     PairingManager.forgetMac(this@P2PDaemonService, macDeviceId)
@@ -529,6 +594,9 @@ class P2PDaemonService : Service() {
                         put("clientTimeMs", json.optLong("clientTimeMs"))
                         put("serverTimeMs", System.currentTimeMillis())
                         put("batteryPercent", batteryPct)
+                        val (network, signal) = cellularInfo()
+                        put("network", network)
+                        put("signalLevel", signal)
                     }
                     sendFrame(FLAG_JSON_FRAME, pong.toString().toByteArray(Charsets.UTF_8))
                 }
@@ -692,6 +760,21 @@ class P2PDaemonService : Service() {
                 close()
                 throw e
             }
+        }
+
+        /** Blocking send for other components (screen frames). False if the link is gone. */
+        fun sendNow(json: JSONObject): Boolean = try {
+            sendJsonNow(json)
+            true
+        } catch (_: Exception) {
+            false
+        }
+
+        private fun sendCallResult(error: String?) {
+            sendJson(JSONObject()
+                .put("type", "CALL_ACTION_RESULT")
+                .put("ok", error == null)
+                .apply { error?.let { put("error", it) } })
         }
 
         private fun handlePairingHandshake(json: JSONObject) {
@@ -869,6 +952,70 @@ class P2PDaemonService : Service() {
             try { sendExecutor.shutdownNow() } catch (_: Exception) {}
             try { socket.close() } catch (_: Exception) {}
         }
+    }
+
+    // =========================================================================
+    // Phone features: SMS, calls, mirroring prompt, hotspot prompt
+    // =========================================================================
+
+    /** Starts the SMS observer and call listener; each is a no-op until its permission is granted. */
+    fun startPhoneBridges() {
+        smsBridge.startObserving { broadcastControlFrame(JSONObject().put("type", "SMS_UPDATED")) }
+        callBridge.start { broadcastControlFrame(it) }
+    }
+
+    /**
+     * Android always asks the person before screen capture. Open the prompt directly when
+     * allowed (app visible, or Mac Control on), and also offer it as a notification.
+     */
+    private fun requestMirroring() {
+        if (ScreenMirrorService.isRunning) return
+        val consent = Intent(this, MirrorConsentActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        try { startActivity(consent) } catch (_: Exception) {}
+        postPrompt(ScreenMirrorService.PROMPT_NOTIFICATION_ID, "Mirror your screen to your Mac?", "Tap to allow",
+            PendingIntent.getActivity(this, 1, consent, PendingIntent.FLAG_IMMUTABLE))
+    }
+
+    private fun promptHotspot() {
+        val tether = Intent(Intent.ACTION_MAIN)
+            .setClassName("com.android.settings", "com.android.settings.TetherSettings")
+            .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        val target = if (tether.resolveActivity(packageManager) != null) tether
+            else Intent(Settings.ACTION_WIRELESS_SETTINGS).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        postPrompt(HOTSPOT_PROMPT_ID, "Your Mac wants your hotspot", "Tap to open hotspot settings",
+            PendingIntent.getActivity(this, 2, target, PendingIntent.FLAG_IMMUTABLE))
+    }
+
+    private fun postPrompt(id: Int, title: String, text: String, tap: PendingIntent) {
+        val nm = getSystemService(NotificationManager::class.java)
+        nm.createNotificationChannel(
+            NotificationChannel(PROMPTS_CHANNEL_ID, "Requests from your Mac", NotificationManager.IMPORTANCE_HIGH)
+        )
+        nm.notify(id, Notification.Builder(this, PROMPTS_CHANNEL_ID)
+            .setSmallIcon(android.R.drawable.stat_sys_data_bluetooth)
+            .setContentTitle(title)
+            .setContentText(text)
+            .setContentIntent(tap)
+            .setAutoCancel(true)
+            .build())
+    }
+
+    /** "5G" / "4G" / … (needs phone permission) and signal bars 0–4 (-1 unknown). */
+    private fun cellularInfo(): Pair<String, Int> {
+        val telephony = getSystemService(TelephonyManager::class.java) ?: return "" to -1
+        val type = if (checkSelfPermission(Manifest.permission.READ_PHONE_STATE) == PackageManager.PERMISSION_GRANTED) {
+            when (telephony.dataNetworkType) {
+                TelephonyManager.NETWORK_TYPE_NR -> "5G"
+                TelephonyManager.NETWORK_TYPE_LTE -> "4G"
+                TelephonyManager.NETWORK_TYPE_UNKNOWN -> ""
+                TelephonyManager.NETWORK_TYPE_HSPAP, TelephonyManager.NETWORK_TYPE_HSPA,
+                TelephonyManager.NETWORK_TYPE_HSDPA, TelephonyManager.NETWORK_TYPE_HSUPA,
+                TelephonyManager.NETWORK_TYPE_UMTS -> "3G"
+                else -> "2G"
+            }
+        } else ""
+        val signal = try { telephony.signalStrength?.level ?: -1 } catch (_: Exception) { -1 }
+        return type to signal
     }
 
     // =========================================================================

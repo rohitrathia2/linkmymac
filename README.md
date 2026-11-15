@@ -41,8 +41,13 @@ The diagram is generated with [archify](https://github.com/tt-a1i/archify) from 
 | **File sharing, both ways** | ✅ | Mac → phone from the File Sharing tab, the Dock icon or the menu bar. Phone → Mac from **Share → LinkMyMac Companion** in any app, or **Send Files to Mac**. Any size, streamed in constant memory. |
 | **Phone camera on the Mac** | ✅ in-app | Live view in the app, front/back lens flip, and a floating always-on-top window. To use it in video calls, see [below](#use-the-phone-camera-in-video-calls). |
 | **Mac "Now Playing" on the phone** | ✅ | Control Mac media playback from a notification on the phone. |
+| **Messages (SMS)** | ✅ | Read conversations and send texts from the Mac. Updates live as messages arrive. |
+| **Calls** | ✅ control | Incoming-call banner with **Answer** / **Decline**, end calls, dial out, recent calls. **Call audio stays on the phone**: Android doesn't let apps route it, and macOS can't act as a Bluetooth headset for a phone. |
+| **Screen mirroring** | ✅ | Live phone screen in the **Phone Screen** section (up to 720 px wide, ~12 fps). Approve Android's prompt on the phone each session. |
+| **Mouse & keyboard on the phone** | ✅ in the mirror window | Click to tap, drag to swipe, scroll, type; Esc is Back, plus Back/Home/Recents buttons. Needs **LinkMyMac Mac Control** turned on in the phone's Accessibility settings. Moving the cursor off the Mac's screen edge onto the phone (Universal Control) isn't built. |
+| **Hotspot** | ⚠️ assisted | The Mac's **Hotspot** button puts a one-tap "open Hotspot settings" prompt on the phone, because Android doesn't let apps switch tethering on. The Mac also shows the phone's network type and signal. |
 | **Shared links/text → Mac clipboard** | ⚠️ partial | Lands on the Mac clipboard; nothing opens automatically. |
-| SMS, calls, screen mirroring, mouse/keyboard sharing, hotspot | ❌ | Not built yet. |
+| Continuity Sketch, document scanner | ❌ | Not built yet. |
 
 ## How it works
 
@@ -86,6 +91,9 @@ Because the app is ad-hoc signed, macOS may ask again for Local Network, Downloa
 2. Start UniBridge on the Mac. It finds the phone over Wi-Fi or USB.
 3. The Mac sidebar asks for a **pairing code**. Type the code shown in the phone app's status badge, or scan its QR code from the Mac's **QR Code Pairing** tab.
 4. Done. Notifications, clipboard and the gallery start syncing. Send files from the **File Sharing** tab, and browse **Photos** or **Videos** (try **Group by Folder**).
+5. For **Messages**, **Calls** and **Phone Screen**, open the phone app's **Messages, Calls & Mac Control** card:
+   - Tap **Allow Messages & Calls**.
+   - Tap **Turn On Mac Control**, then enable "LinkMyMac Mac Control".
 
 ## Use the phone camera in video calls
 The phone camera doesn't register as a system webcam yet, so call apps can't list it directly. Use OBS as a bridge:
@@ -111,9 +119,13 @@ A native camera extension would make this one step; it needs a Developer ID–si
 | All-files access (`MANAGE_EXTERNAL_STORAGE`) | Only so **Delete from Mac** can remove photos/videos made by other apps. Google Play restricts this permission; a Play build would use `MediaStore.createDeleteRequest` instead. |
 | Camera | Phone camera view |
 | Start at boot (`RECEIVE_BOOT_COMPLETED`) | Restart the bridge after a reboot or update |
+| SMS (`READ_SMS`, `SEND_SMS`), contacts (`READ_CONTACTS`) | Messages: read conversations, send texts, show contact names |
+| Phone (`READ_PHONE_STATE`, `READ_CALL_LOG`, `ANSWER_PHONE_CALLS`, `CALL_PHONE`) | Calls: incoming-call banner, answer/decline/end, dial, recent calls |
+| Screen capture (`FOREGROUND_SERVICE_MEDIA_PROJECTION`) | Screen mirroring; Android also asks each session |
+| Accessibility service "LinkMyMac Mac Control" | Mac mouse and keyboard on the phone; it only acts on input sent from your paired Mac |
 | Launcher `<queries>` | App names and icons for mirrored notifications (instead of `QUERY_ALL_PACKAGES`) |
 
-No SMS, contacts or call permissions.
+SMS, call-log and accessibility access are restricted on Google Play, which is one more reason this app is distributed as an APK.
 
 ## Repository layout
 ```
@@ -123,13 +135,17 @@ android-app/src/main/java/com/linkmymac/android/
   service/MediaStoreProvider.kt   photo/video pages, folders, delete
   service/LMMNotificationListener.kt, ClipboardSyncHelper.kt, CameraStreamProvider.kt
   service/AutoStartReceiver.kt    restart after reboot/update
-  ui/MainActivity.kt              pairing code, share target, Send Files
+  service/SmsBridge.kt, CallBridge.kt          messages and calls
+  service/ScreenMirrorService.kt, ControlService.kt   mirroring, mouse/keyboard control
+  ui/MainActivity.kt              pairing code, share target, Send Files, permissions
+  ui/MirrorConsentActivity.kt     Android's screen-capture prompt
 macos-app/
   bundle.sh, Info.plist           build LinkMyMac.app
   Sources/LinkMyMac/
     LinkMyMacApp.swift            dashboard, Photos/Videos, File Sharing, preview player
     MacP2PClient.swift            discovery, connection, auth, transfers
     MediaStreamLoader.swift       AVPlayer byte-range streaming
+    PhoneFeatures.swift, PhoneViews.swift   Messages, Calls, Phone Screen (+ input), hotspot
     MacSubsystems.swift           clipboard watcher, notification banners
   Checks/StreamLoaderCheck.swift  headless streaming check
 protocol/

@@ -109,6 +109,11 @@ struct LinkMyMacApp: App {
                 }
                 .disabled(!p2pClient.isPaired)
 
+                Button("Turn On Phone Hotspot…") {
+                    p2pClient.phone.requestHotspot()
+                }
+                .disabled(!p2pClient.isPaired)
+
                 Divider()
 
                 Button("Quit UniBridge") {
@@ -138,6 +143,9 @@ enum DashboardTab: String, CaseIterable, Identifiable {
     case photos = "Photos"
     case videos = "Videos"
     case files = "File Sharing"
+    case messages = "Messages"
+    case calls = "Calls"
+    case phoneScreen = "Phone Screen"
     case camera = "FaceTime Camera"
     case clipboard = "Universal Clipboard"
     case qrPairing = "QR Code Pairing"
@@ -150,6 +158,9 @@ enum DashboardTab: String, CaseIterable, Identifiable {
         case .photos: return "photo.on.rectangle.angled"
         case .videos: return "film.stack"
         case .files: return "arrow.up.arrow.down.circle.fill"
+        case .messages: return "message.fill"
+        case .calls: return "phone.fill"
+        case .phoneScreen: return "iphone.gen3"
         case .camera: return "video.fill"
         case .clipboard: return "doc.on.clipboard.fill"
         case .qrPairing: return "qrcode.viewfinder"
@@ -368,6 +379,9 @@ struct DashboardView: View {
                         .font(.caption2)
                         .foregroundColor(.red)
                 }
+                if p2pClient.isPaired {
+                    PhoneStatusRow(phone: p2pClient.phone)
+                }
             }
             .padding(12)
             .background(Color.secondary.opacity(0.08))
@@ -432,6 +446,8 @@ struct DashboardView: View {
                             Circle()
                                 .fill(Color.green)
                                 .frame(width: 6, height: 6)
+                        case .messages, .calls, .phoneScreen:
+                            PhoneTabBadge(phone: p2pClient.phone, tab: tab)
                         case .qrPairing:
                             EmptyView()
                         }
@@ -499,6 +515,12 @@ struct DashboardView: View {
             cameraDetailView
         case .clipboard:
             clipboardDetailView
+        case .messages:
+            MessagesView(phone: p2pClient.phone)
+        case .calls:
+            CallsView(phone: p2pClient.phone)
+        case .phoneScreen:
+            PhoneScreenView(phone: p2pClient.phone)
         case .qrPairing:
             qrPairingDetailView
         }
@@ -1820,6 +1842,9 @@ struct DashboardView: View {
         case .photos: return .blue
         case .videos: return .indigo
         case .files: return .teal
+        case .messages: return .mint
+        case .calls: return .cyan
+        case .phoneScreen: return .pink
         case .camera: return .green
         case .clipboard: return .purple
         case .qrPairing: return .orange

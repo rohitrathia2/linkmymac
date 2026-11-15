@@ -238,7 +238,11 @@ public final class MacP2PClient: ObservableObject {
     public var onConnected: (() -> Void)?
     public var onFileReceived: ((URL) -> Void)?
 
+    /// SMS, calls, screen mirroring + control, hotspot (PhoneFeatures.swift)
+    let phone = PhoneFeatures()
+
     public init() {
+        phone.client = self
         startDiscovery()
         // The first direct connection (last used host, USB tunnel by default) is opened by AppDelegate.
     }
@@ -465,6 +469,7 @@ public final class MacP2PClient: ObservableObject {
         mediaRangeSinks.removeAll()
         openRanges.forEach { $0(.done(error: "Connection lost")) } // the player shows an error instead of hanging
         failUnfinishedTransfers(reason: "Connection lost")
+        phone.connectionLost()
         connectedDeviceName = nil
         connectionState = "Disconnected"
     }
@@ -680,6 +685,7 @@ public final class MacP2PClient: ObservableObject {
             if let pct = json["batteryPercent"] as? Int {
                 self.remoteBatteryPercent = pct
             }
+            phone.updateNetwork(json)
 
         case "NOTIFICATION_EVENT":
             handleNotificationFrame(json)
@@ -752,7 +758,7 @@ public final class MacP2PClient: ObservableObject {
             }
 
         default:
-            break
+            _ = phone.handle(type, json) // SMS, calls, mirroring, control, hotspot
         }
     }
 
@@ -1049,6 +1055,7 @@ public final class MacP2PClient: ObservableObject {
         }
         // The phone pushes its notifications itself once we're verified.
         requestMediaIndex(offset: 0, limit: 30)
+        phone.loadAll()
         onConnected?()
     }
 

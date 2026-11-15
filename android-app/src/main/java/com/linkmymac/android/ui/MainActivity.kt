@@ -39,6 +39,7 @@ import com.google.zxing.qrcode.QRCodeWriter
 import com.linkmymac.android.R
 import com.linkmymac.android.crypto.CryptoKeystoreManager
 import com.linkmymac.android.crypto.PairingManager
+import com.linkmymac.android.service.ControlService
 import com.linkmymac.android.service.LMMNotificationListener
 import com.linkmymac.android.service.P2PDaemonService
 
@@ -87,6 +88,17 @@ class MainActivity : Activity() {
     private lateinit var storageStatusPill: TextView
     private lateinit var storageActionButton: Button
     private lateinit var cameraStatusPill: TextView
+    private lateinit var phoneStatusPill: TextView
+    private lateinit var phoneActionButton: Button
+    private val phonePermissions = arrayOf(
+        android.Manifest.permission.READ_SMS,
+        android.Manifest.permission.SEND_SMS,
+        android.Manifest.permission.READ_CONTACTS,
+        android.Manifest.permission.READ_PHONE_STATE,
+        android.Manifest.permission.READ_CALL_LOG,
+        android.Manifest.permission.ANSWER_PHONE_CALLS,
+        android.Manifest.permission.CALL_PHONE
+    )
     private lateinit var cameraActionButton: Button
     private lateinit var networkStatusBadge: TextView
     private lateinit var ipPillText: TextView
@@ -330,6 +342,25 @@ class MainActivity : Activity() {
             cameraStatusPill.setTextColor(Color.parseColor("#FBBF24"))
             cameraActionButton.visibility = View.VISIBLE
         }
+
+        // 4. Messages, calls & Mac control
+        val hasPhone = phonePermissions.all { checkSelfPermission(it) == PackageManager.PERMISSION_GRANTED }
+        val hasControl = ControlService.instance != null
+        phoneStatusPill.text = when {
+            hasPhone && hasControl -> "✓ READY"
+            hasPhone -> "CONTROL OFF"
+            else -> "ACTION REQUIRED"
+        }
+        val ready = hasPhone && hasControl
+        phoneStatusPill.background = createPillDrawable(if (ready) "#052E16" else "#451A03", if (ready) "#10B981" else "#F59E0B")
+        phoneStatusPill.setTextColor(Color.parseColor(if (ready) "#34D399" else "#FBBF24"))
+        phoneActionButton.visibility = if (hasPhone) View.GONE else View.VISIBLE
+    }
+
+    override fun onRequestPermissionsResult(requestCode: Int, permissions: Array<out String>, grantResults: IntArray) {
+        super.onRequestPermissionsResult(requestCode, permissions, grantResults)
+        if (requestCode == 103) P2PDaemonService.onPermissionsChanged() // start SMS observer + call listener
+        updateAllPermissionStates()
     }
 
     /**
@@ -910,6 +941,29 @@ class MainActivity : Activity() {
             }
         )
         root.addView(cameraCard)
+
+        // Card 4: Messages, calls and Mac mouse/keyboard control
+        val phoneCard = createFeatureCard(
+            iconRes = "💬",
+            titleText = "Messages, Calls & Mac Control",
+            descriptionText = "Read and send SMS, answer calls and see recent calls from your Mac. " +
+                "Turn on \"LinkMyMac Mac Control\" in Accessibility to use your Mac's mouse and keyboard on this phone.",
+            statusPillInit = { phoneStatusPill = it },
+            actionButtonInit = {
+                phoneActionButton = it
+                it.text = "Allow Messages & Calls"
+                it.setOnClickListener { requestPermissions(phonePermissions, 103) }
+            }
+        )
+        phoneCard.addView(createModernButton("Turn On Mac Control (Accessibility)", "#1E293B", "#F8FAFC") {
+            startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS))
+        }.apply {
+            layoutParams = LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT
+            ).apply { topMargin = dp(8) }
+        })
+        root.addView(phoneCard)
 
         // =====================================================================
         // Scope 2.5: Continuity Camera Live Hardware Controller

@@ -1,0 +1,4 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="control_service_description">Lets your paired Mac tap, scroll and type on this phone from the LinkMyMac Phone Screen window. It only acts on input you send from your Mac.</string>
+</resources>
