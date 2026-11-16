@@ -102,6 +102,12 @@ class P2PDaemonService : Service() {
         val activeMediaNotificationHelper: MediaNotificationHelper?
             get() = instance?.mediaNotificationHelper
 
+        /** Mac output volume 0–100 from VOLUME_STATE; -1 until the Mac reports it. */
+        @Volatile var macVolume = -1
+        @Volatile var macMuted = false
+        /** Called on the socket thread when the Mac's volume or mute changes. */
+        @Volatile var onMacVolumeChanged: (() -> Unit)? = null
+
         /** Thread-safe list of active connected Mac client sessions */
         private val activeClients = CopyOnWriteArrayList<ClientSession>()
 
@@ -502,6 +508,19 @@ class P2PDaemonService : Service() {
                 if (connectedClientCount == 0) {
                     cameraProvider.stopStream()
                     ScreenMirrorService.stop(this@P2PDaemonService) // nobody left to watch
+                    macVolume = -1
+                    onMacVolumeChanged?.invoke()
+                    mediaNotificationHelper.updateNowPlaying(
+                        hasMedia = false,
+                        title = "",
+                        artist = "",
+                        album = "",
+                        isPlaying = false,
+                        duration = 0.0,
+                        elapsedTime = 0.0,
+                        appName = "",
+                        artwork = ""
+                    )
                 }
             }
         }
@@ -712,6 +731,7 @@ class P2PDaemonService : Service() {
                     val duration = json.optDouble("duration", 0.0)
                     val elapsedTime = json.optDouble("elapsedTime", 0.0)
                     val appName = json.optString("appName", "Mac Media")
+                    val artwork = json.optString("artwork", "")
                     mediaNotificationHelper.updateNowPlaying(
                         hasMedia = hasMedia,
                         title = title,
@@ -720,8 +740,15 @@ class P2PDaemonService : Service() {
                         isPlaying = isPlaying,
                         duration = duration,
                         elapsedTime = elapsedTime,
-                        appName = appName
+                        appName = appName,
+                        artwork = artwork
                     )
+                }
+
+                "VOLUME_STATE" -> {
+                    macVolume = json.optInt("volume", 0).coerceIn(0, 100)
+                    macMuted = json.optBoolean("muted", false)
+                    onMacVolumeChanged?.invoke()
                 }
             }
         }
