@@ -64,6 +64,7 @@ public final class MacMediaManager: NSObject {
         public var duration: Double = 0.0
         public var elapsedTime: Double = 0.0
         public var appName: String = "Mac Media"
+        public var artwork: String = ""
     }
 
     private let p2pClient: MacP2PClient
@@ -80,6 +81,25 @@ public final class MacMediaManager: NSObject {
     public init(p2pClient: MacP2PClient) {
         self.p2pClient = p2pClient
         super.init()
+        // ponytail: 1 s AppleScript poll (~2 ms); a CoreAudio property listener if it ever shows up in profiles.
+        Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in
+            MainActor.assumeIsolated { self?.pollVolume() }
+        }
+    }
+
+    /// Last volume sent to the phone; nil forces the next poll to send.
+    private var lastVolume: (level: Int, muted: Bool)?
+
+    private func pollVolume() {
+        var error: NSDictionary?
+        guard let list = NSAppleScript(source: "set s to get volume settings\nreturn {output volume of s, output muted of s}")?
+            .executeAndReturnError(&error), list.numberOfItems == 2 else { return }
+        let level = Int(list.atIndex(1)?.int32Value ?? 0)
+        let muted = list.atIndex(2)?.booleanValue ?? false
+        if let last = lastVolume, last.level == level, last.muted == muted { return }
+        if p2pClient.sendControlJSON(["type": "VOLUME_STATE", "volume": level, "muted": muted]) {
+            lastVolume = (level, muted)
+        }
     }
 
     deinit {
@@ -137,6 +157,59 @@ public final class MacMediaManager: NSObject {
         }
     }
 
+    var lastRawArtworkData: Data? = nil
+    var cachedArtworkBase64: String = ""
+
+    func processArtworkData(_ rawData: Data?) -> String {
+        guard let rawData = rawData, !rawData.isEmpty else { return "" }
+        guard let img = NSImage(data: rawData) else { return "" }
+        let size = img.size
+        guard size.width > 0 && size.height > 0 else { return "" }
+
+        let maxDim: CGFloat = 320.0
+        let scale = min(maxDim / size.width, maxDim / size.height, 1.0)
+        let newSize = NSSize(width: max(1, round(size.width * scale)), height: max(1, round(size.height * scale)))
+
+        guard let rep = NSBitmapImageRep(
+            bitmapDataPlanes: nil,
+            pixelsWide: Int(newSize.width),
+            pixelsHigh: Int(newSize.height),
+            bitsPerSample: 8,
+            samplesPerPixel: 4,
+            hasAlpha: true,
+            isPlanar: false,
+            colorSpaceName: .deviceRGB,
+            bytesPerRow: 0,
+            bitsPerPixel: 0
+        ) else {
+            return ""
+        }
+
+        NSGraphicsContext.saveGraphicsState()
+        NSGraphicsContext.current = NSGraphicsContext(bitmapImageRep: rep)
+        img.draw(in: NSRect(origin: .zero, size: newSize), from: NSRect(origin: .zero, size: size), operation: .copy, fraction: 1.0)
+        NSGraphicsContext.restoreGraphicsState()
+
+        guard let jpegData = rep.representation(using: .jpeg, properties: [.compressionFactor: 0.75]) else {
+            return ""
+        }
+        return jpegData.base64EncodedString()
+    }
+
+    func getArtworkBase64(from raw: Data?) -> String {
+        guard let raw = raw, !raw.isEmpty else {
+            lastRawArtworkData = nil
+            cachedArtworkBase64 = ""
+            return ""
+        }
+        if let last = lastRawArtworkData, last == raw {
+            return cachedArtworkBase64
+        }
+        lastRawArtworkData = raw
+        cachedArtworkBase64 = processArtworkData(raw)
+        return cachedArtworkBase64
+    }
+
     func fetchInfo(appName: String) {
         getFn(DispatchQueue.main) { dict in
             guard let d = dict as? [String: Any] else {
@@ -150,6 +223,8 @@ public final class MacMediaManager: NSObject {
             let rate = (d["kMRMediaRemoteNowPlayingInfoPlaybackRate"] as? Double) ?? 0.0
             let dur = (d["kMRMediaRemoteNowPlayingInfoDuration"] as? Double) ?? 0.0
             let elapsed = (d["kMRMediaRemoteNowPlayingInfoElapsedTime"] as? Double) ?? 0.0
+            let rawArt = d["kMRMediaRemoteNowPlayingInfoArtworkData"] as? Data
+            let artwork = getArtworkBase64(from: rawArt)
 
             let payload: [String: Any] = [
                 "hasMedia": !title.isEmpty,
@@ -159,7 +234,8 @@ public final class MacMediaManager: NSObject {
                 "isPlaying": rate > 0.0,
                 "duration": dur,
                 "elapsedTime": elapsed,
-                "appName": appName
+                "appName": appName,
+                "artwork": artwork
             ]
             if let data = try? JSONSerialization.data(withJSONObject: payload),
                var str = String(data: data, encoding: .utf8) {
@@ -260,7 +336,7 @@ public final class MacMediaManager: NSObject {
 
         // Write script if missing or updated
         if let data = Self.helperScriptSource.data(using: .utf8) {
-            try? data.write(to: scriptURL)
+            try? data.write(to: scriptURL, options: .atomic)
         }
         return scriptURL
     }
@@ -354,13 +430,14 @@ public final class MacMediaManager: NSObject {
             newState.duration = (dict["duration"] as? Double) ?? 0.0
             newState.elapsedTime = (dict["elapsedTime"] as? Double) ?? 0.0
             newState.appName = (dict["appName"] as? String) ?? "Mac Media"
+            newState.artwork = (dict["artwork"] as? String) ?? ""
         }
 
         self.currentState = newState
 
         // Determine if broadcast is needed
         if newState != lastSentState || !hasSentInitialConnectedState {
-            Self.logToFile("State changed: hasMedia=\(newState.hasMedia), title='\(newState.title)', isPlaying=\(newState.isPlaying), app=\(newState.appName)")
+            Self.logToFile("State changed: hasMedia=\(newState.hasMedia), title='\(newState.title)', isPlaying=\(newState.isPlaying), app=\(newState.appName), hasArtwork=\(!newState.artwork.isEmpty)")
             let sent = broadcastState(newState)
             if sent {
                 lastSentState = newState
@@ -372,6 +449,7 @@ public final class MacMediaManager: NSObject {
     public func forceBroadcastCurrentState() {
         Self.logToFile("forceBroadcastCurrentState requested")
         hasSentInitialConnectedState = false
+        lastVolume = nil // a fresh connection gets the current volume on the next poll
 
         // Send query to helper
         sendCommandToHelper("QUERY")
@@ -401,6 +479,7 @@ public final class MacMediaManager: NSObject {
             payload["duration"] = state.duration
             payload["elapsedTime"] = state.elapsedTime
             payload["appName"] = state.appName
+            payload["artwork"] = state.artwork
         }
 
         let success = p2pClient.sendControlJSON(payload)
@@ -424,6 +503,15 @@ public final class MacMediaManager: NSObject {
         Self.logToFile("handleCommand received from Android: \(action)")
         let upper = action.uppercased()
 
+        // Phone volume slider: "SET_VOLUME:<0-100>"; setting a level also unmutes.
+        if upper.hasPrefix("SET_VOLUME:") {
+            if let level = Int(upper.dropFirst("SET_VOLUME:".count)), (0...100).contains(level) {
+                runVolumeScript("set volume output volume \(level) output muted false")
+                pollVolume()
+            }
+            return
+        }
+
         // 1. Direct pipe to helper daemon
         sendCommandToHelper(upper)
 
@@ -435,9 +523,42 @@ public final class MacMediaManager: NSObject {
             postSystemMediaKey(17) // NX_KEYTYPE_NEXT
         case "PREV_TRACK":
             postSystemMediaKey(18) // NX_KEYTYPE_PREVIOUS
+        // Real volume keys show macOS's volume slider, but macOS drops synthetic keys
+        // unless the app has Accessibility permission; without it, set the volume
+        // directly (no slider) and ask for the permission once.
+        case "VOLUME_UP":
+            volumeKeyOrScript(0, "set volume output volume ((output volume of (get volume settings)) + 6)") // NX_KEYTYPE_SOUND_UP
+        case "VOLUME_DOWN":
+            volumeKeyOrScript(1, "set volume output volume ((output volume of (get volume settings)) - 6)") // NX_KEYTYPE_SOUND_DOWN
+        case "VOLUME_MUTE":
+            volumeKeyOrScript(7, "set volume output muted (not (output muted of (get volume settings)))") // NX_KEYTYPE_MUTE
         default:
             break
         }
+    }
+
+    private var askedForAccessibility = false
+
+    private func volumeKeyOrScript(_ key: Int32, _ fallbackScript: String) {
+        // Report the new level to the phone's slider without waiting for the 1 s poll.
+        Task { try? await Task.sleep(for: .milliseconds(200)); pollVolume() }
+        if AXIsProcessTrusted() {
+            postSystemMediaKey(key)
+            return
+        }
+        runVolumeScript(fallbackScript)
+        if !askedForAccessibility {
+            askedForAccessibility = true
+            // "AXTrustedCheckOptionPrompt" is kAXTrustedCheckOptionPrompt; the constant isn't Swift 6 concurrency-safe.
+            let opts = ["AXTrustedCheckOptionPrompt": true] as CFDictionary
+            _ = AXIsProcessTrustedWithOptions(opts)
+        }
+    }
+
+    private func runVolumeScript(_ source: String) {
+        var error: NSDictionary?
+        NSAppleScript(source: source)?.executeAndReturnError(&error)
+        if let error { Self.logToFile("volume script failed: \(error)") }
     }
 
     private func sendCommandToHelper(_ cmd: String) {

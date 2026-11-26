@@ -6,11 +6,14 @@ import android.app.NotificationManager
 import android.app.PendingIntent
 import android.content.Context
 import android.content.Intent
+import android.graphics.Bitmap
+import android.graphics.BitmapFactory
 import android.graphics.drawable.Icon
 import android.media.MediaMetadata
 import android.media.session.MediaSession
 import android.media.session.PlaybackState
 import android.os.Build
+import android.util.Base64
 import com.linkmymac.android.R
 import com.linkmymac.android.ui.MainActivity
 
@@ -51,8 +54,19 @@ class MediaNotificationHelper(private val context: Context) {
         val isPlaying: Boolean = false,
         val duration: Double = 0.0,
         val elapsedTime: Double = 0.0,
-        val appName: String = "Mac Media"
-    )
+        val appName: String = "Mac Media",
+        val artwork: String = ""
+    ) {
+        fun decodeArtwork(): Bitmap? {
+            if (artwork.isBlank()) return null
+            return try {
+                val bytes = Base64.decode(artwork, Base64.DEFAULT)
+                BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
+            } catch (_: Exception) {
+                null
+            }
+        }
+    }
 
     companion object {
         const val CHANNEL_ID = "linkmymac_media_playback_channel"
@@ -71,6 +85,35 @@ class MediaNotificationHelper(private val context: Context) {
     @Volatile
     var currentData = NowPlayingData()
         private set
+
+    private var cachedArtworkBase64: String = ""
+    @Volatile
+    var currentArtworkBitmap: Bitmap? = null
+        private set
+
+    /**
+     * Resolves and caches the Bitmap from Base64 image payload to avoid repetitive decoding.
+     */
+    fun resolveArtworkBitmap(artwork: String): Bitmap? {
+        if (artwork.isBlank()) {
+            cachedArtworkBase64 = ""
+            currentArtworkBitmap = null
+            return null
+        }
+        if (artwork == cachedArtworkBase64 && currentArtworkBitmap != null) {
+            return currentArtworkBitmap
+        }
+        return try {
+            val bytes = Base64.decode(artwork, Base64.DEFAULT)
+            val bmp = BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
+            cachedArtworkBase64 = artwork
+            currentArtworkBitmap = bmp
+            bmp
+        } catch (e: Exception) {
+            android.util.Log.e("MediaNotificationHelper", "Failed to decode artwork", e)
+            null
+        }
+    }
 
     /** Observable listener invoked whenever playback state or track metadata changes */
     @Volatile
@@ -139,8 +182,18 @@ class MediaNotificationHelper(private val context: Context) {
         isPlaying: Boolean,
         duration: Double,
         elapsedTime: Double,
-        appName: String
+        appName: String,
+        artwork: String = ""
     ) {
+        // Retain current artwork if this is an elapsed/progress tick of the same track without new artwork payload
+        val effectiveArtwork = if (artwork.isNotEmpty()) {
+            artwork
+        } else if (hasMedia && title == currentData.title && currentData.artwork.isNotEmpty()) {
+            currentData.artwork
+        } else {
+            ""
+        }
+
         val updated = NowPlayingData(
             hasMedia = hasMedia,
             title = title,
@@ -149,7 +202,8 @@ class MediaNotificationHelper(private val context: Context) {
             isPlaying = isPlaying,
             duration = duration,
             elapsedTime = elapsedTime,
-            appName = appName
+            appName = appName,
+            artwork = effectiveArtwork
         )
         currentData = updated
 
@@ -157,6 +211,8 @@ class MediaNotificationHelper(private val context: Context) {
             // Dismiss media notification and deactivate session
             notificationManager.cancel(NOTIFICATION_ID)
             mediaSession?.isActive = false
+            cachedArtworkBase64 = ""
+            currentArtworkBitmap = null
             onNowPlayingChanged?.invoke(updated)
             return
         }
@@ -182,14 +238,19 @@ class MediaNotificationHelper(private val context: Context) {
                 .build()
             session.setPlaybackState(state)
 
-            // 2. Media Metadata
-            val meta = MediaMetadata.Builder()
+            // 2. Media Metadata & Artwork
+            val artworkBitmap = resolveArtworkBitmap(effectiveArtwork)
+            val metaBuilder = MediaMetadata.Builder()
                 .putString(MediaMetadata.METADATA_KEY_TITLE, title)
                 .putString(MediaMetadata.METADATA_KEY_ARTIST, artist.ifEmpty { "Mac Audio" })
                 .putString(MediaMetadata.METADATA_KEY_ALBUM, album)
                 .putLong(MediaMetadata.METADATA_KEY_DURATION, (duration * 1000).toLong())
-                .build()
-            session.setMetadata(meta)
+
+            if (artworkBitmap != null) {
+                metaBuilder.putBitmap(MediaMetadata.METADATA_KEY_ALBUM_ART, artworkBitmap)
+                metaBuilder.putBitmap(MediaMetadata.METADATA_KEY_ART, artworkBitmap)
+            }
+            session.setMetadata(metaBuilder.build())
 
             // 3. System Notification with MediaStyle
             val contentIntent = PendingIntent.getActivity(
@@ -244,6 +305,14 @@ class MediaNotificationHelper(private val context: Context) {
                 .setContentIntent(contentIntent)
                 .setOngoing(isPlaying)
                 .setVisibility(Notification.VISIBILITY_PUBLIC)
+
+            if (artworkBitmap != null) {
+                notifBuilder.setLargeIcon(Icon.createWithBitmap(artworkBitmap))
+            } else {
+                notifBuilder.setLargeIcon(null as Icon?)
+            }
+
+            notifBuilder
                 .addAction(
                     Notification.Action.Builder(
                         Icon.createWithResource(context, android.R.drawable.ic_media_previous),
@@ -284,5 +353,7 @@ class MediaNotificationHelper(private val context: Context) {
             mediaSession?.release()
             mediaSession = null
         } catch (_: Exception) {}
+        cachedArtworkBase64 = ""
+        currentArtworkBitmap = null
     }
 }

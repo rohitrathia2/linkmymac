@@ -10,6 +10,7 @@ import android.content.pm.PackageManager
 import android.content.res.ColorStateList
 import android.graphics.Bitmap
 import android.graphics.Color
+import android.graphics.Outline
 import android.graphics.Typeface
 import android.graphics.drawable.GradientDrawable
 import android.graphics.drawable.RippleDrawable
@@ -22,9 +23,11 @@ import android.os.Handler
 import android.os.Looper
 import android.os.SystemClock
 import android.provider.Settings
+import android.text.TextUtils
 import android.text.format.Formatter
 import android.view.Gravity
 import android.view.View
+import android.view.ViewOutlineProvider
 import android.view.WindowManager
 import android.widget.Button
 import android.text.style.ForegroundColorSpan
@@ -36,6 +39,7 @@ import android.widget.EditText
 import android.widget.ImageView
 import android.widget.LinearLayout
 import android.widget.ScrollView
+import android.widget.SeekBar
 import android.widget.TextView
 import android.widget.Toast
 import com.google.zxing.BarcodeFormat
@@ -119,6 +123,10 @@ class MainActivity : Activity() {
     private lateinit var mediaStatusBadge: TextView
     private lateinit var mediaTitleText: TextView
     private lateinit var mediaSubtitleText: TextView
+    private lateinit var mediaThumbnailImage: ImageView
+    private lateinit var macVolumeSeek: SeekBar
+    private lateinit var macVolumeLabel: TextView
+    private var draggingMacVolume = false
     private lateinit var btnMediaPrev: Button
     private lateinit var btnMediaPlayPause: Button
     private lateinit var btnMediaNext: Button
@@ -599,6 +607,10 @@ class MainActivity : Activity() {
             }
         }
 
+        // 5b. Mac volume slider follows the Mac's real volume
+        updateMacVolumeUi()
+        P2PDaemonService.onMacVolumeChanged = { runOnUiThread { updateMacVolumeUi() } }
+
         // 6. Start Dynamic Automatic Refresh Loop (1-second tick)
         autoRefreshRunnable?.let { autoRefreshHandler.removeCallbacks(it) }
         val runnable = object : Runnable {
@@ -613,6 +625,7 @@ class MainActivity : Activity() {
 
     override fun onPause() {
         super.onPause()
+        P2PDaemonService.onMacVolumeChanged = null
         autoRefreshRunnable?.let { autoRefreshHandler.removeCallbacks(it) }
         autoRefreshRunnable = null
 
@@ -637,8 +650,21 @@ class MainActivity : Activity() {
      *                 well as on the notification panel.
      * -------------------------------------------------------------------------
      */
+    /** Shows the Mac's current volume; skipped while the user is dragging the slider. */
+    private fun updateMacVolumeUi() {
+        if (!::macVolumeSeek.isInitialized || draggingMacVolume) return
+        val level = P2PDaemonService.macVolume
+        macVolumeSeek.isEnabled = level >= 0
+        if (level < 0) {
+            macVolumeLabel.text = "—"
+            return
+        }
+        macVolumeSeek.progress = level
+        macVolumeLabel.text = if (P2PDaemonService.macMuted) "Muted" else "$level%"
+    }
+
     private fun updateMediaCardState(data: com.linkmymac.android.service.MediaNotificationHelper.NowPlayingData) {
-        if (!::mediaStatusBadge.isInitialized || !::mediaTitleText.isInitialized) return
+        if (!::mediaStatusBadge.isInitialized || !::mediaTitleText.isInitialized || !::mediaThumbnailImage.isInitialized) return
 
         if (!data.hasMedia || data.title.isBlank()) {
             livePlaybackElapsed = 0.0
@@ -653,6 +679,12 @@ class MainActivity : Activity() {
             btnMediaPlayPause.isEnabled = false
             btnMediaPrev.isEnabled = false
             btnMediaNext.isEnabled = false
+
+            // Standby placeholder artwork
+            mediaThumbnailImage.setImageResource(R.drawable.app_logo)
+            mediaThumbnailImage.scaleType = ImageView.ScaleType.FIT_CENTER
+            mediaThumbnailImage.setPadding(dp(14), dp(14), dp(14), dp(14))
+            mediaThumbnailImage.imageTintList = ColorStateList.valueOf(Color.parseColor("#4B5377"))
         } else {
             livePlaybackElapsed = data.elapsedTime
             lastPlaybackUpdateTime = SystemClock.elapsedRealtime()
@@ -661,6 +693,22 @@ class MainActivity : Activity() {
             btnMediaNext.isEnabled = true
             mediaTitleText.text = data.title
             mediaTitleText.setTextColor(Color.WHITE)
+
+            // Resolve Artwork Thumbnail
+            val bitmap = P2PDaemonService.activeMediaNotificationHelper?.currentArtworkBitmap
+                ?: data.decodeArtwork()
+
+            if (bitmap != null) {
+                mediaThumbnailImage.setImageBitmap(bitmap)
+                mediaThumbnailImage.scaleType = ImageView.ScaleType.CENTER_CROP
+                mediaThumbnailImage.setPadding(0, 0, 0, 0)
+                mediaThumbnailImage.imageTintList = null
+            } else {
+                mediaThumbnailImage.setImageResource(R.drawable.app_logo)
+                mediaThumbnailImage.scaleType = ImageView.ScaleType.FIT_CENTER
+                mediaThumbnailImage.setPadding(dp(14), dp(14), dp(14), dp(14))
+                mediaThumbnailImage.imageTintList = ColorStateList.valueOf(Color.parseColor("#8F98FF"))
+            }
 
             val timeStr = if (data.duration > 0.0) {
                 val curM = (data.elapsedTime.toInt()) / 60
@@ -1108,13 +1156,14 @@ class MainActivity : Activity() {
         mediaHeaderRow.addView(mediaStatusBadge)
         mediaCard.addView(mediaHeaderRow)
 
-        // Track Display Box
+        // Track Display Box with Media Thumbnail & Info
         val trackBox = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
             setPadding(dp(12), dp(12), dp(12), dp(12))
             background = GradientDrawable().apply {
                 setColor(Color.parseColor("#0B0D17"))
-                cornerRadius = dp(10f)
+                cornerRadius = dp(12f)
                 setStroke(dp(1), Color.parseColor("#20243A"))
             }
             layoutParams = LinearLayout.LayoutParams(
@@ -1123,21 +1172,54 @@ class MainActivity : Activity() {
             ).apply { bottomMargin = dp(14) }
         }
 
+        mediaThumbnailImage = ImageView(this).apply {
+            layoutParams = LinearLayout.LayoutParams(dp(68), dp(68)).apply {
+                marginEnd = dp(14)
+            }
+            scaleType = ImageView.ScaleType.FIT_CENTER
+            outlineProvider = object : ViewOutlineProvider() {
+                override fun getOutline(view: View, outline: Outline) {
+                    outline.setRoundRect(0, 0, view.width, view.height, dp(10f))
+                }
+            }
+            clipToOutline = true
+            background = GradientDrawable().apply {
+                setColor(Color.parseColor("#151828"))
+                cornerRadius = dp(10f)
+                setStroke(dp(1), Color.parseColor("#262B44"))
+            }
+            setImageResource(R.drawable.app_logo)
+            setPadding(dp(14), dp(14), dp(14), dp(14))
+            imageTintList = ColorStateList.valueOf(Color.parseColor("#4B5377"))
+        }
+        trackBox.addView(mediaThumbnailImage)
+
+        val trackInfoBox = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
+        }
+
         mediaTitleText = TextView(this).apply {
             text = "No active media playing on Mac"
             textSize = 15f
             typeface = Typeface.DEFAULT_BOLD
             setTextColor(Color.parseColor("#A6ACC4"))
+            maxLines = 2
+            ellipsize = TextUtils.TruncateAt.END
             setPadding(0, 0, 0, dp(4))
         }
-        trackBox.addView(mediaTitleText)
+        trackInfoBox.addView(mediaTitleText)
 
         mediaSubtitleText = TextView(this).apply {
             text = "Start audio or video on Mac (Spotify, YouTube, Apple Music) to control it here and in your notifications."
             textSize = 12f
             setTextColor(Color.parseColor("#6F7593"))
+            maxLines = 3
+            ellipsize = TextUtils.TruncateAt.END
         }
-        trackBox.addView(mediaSubtitleText)
+        trackInfoBox.addView(mediaSubtitleText)
+
+        trackBox.addView(trackInfoBox)
         mediaCard.addView(trackBox)
 
         // Media Controls Button Row (Prev, Play/Pause, Next)
@@ -1188,6 +1270,64 @@ class MainActivity : Activity() {
         }
         mediaButtonRow.addView(btnMediaNext)
         mediaCard.addView(mediaButtonRow)
+
+        // Mac volume row: always enabled, volume works with nothing playing.
+        val volumeRow = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER
+            setPadding(0, 0, 0, dp(10))
+        }
+        listOf("🔉 Vol −" to "VOLUME_DOWN", "🔇 Mute" to "VOLUME_MUTE", "🔊 Vol +" to "VOLUME_UP")
+            .forEachIndexed { i, (label, action) ->
+                volumeRow.addView(createModernButton(text = label, bgColor = "#20243A", textColor = "#8F98FF") {
+                    P2PDaemonService.sendMediaCommand(action)
+                }.apply {
+                    layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f).apply {
+                        if (i < 2) marginEnd = dp(6)
+                    }
+                })
+            }
+        mediaCard.addView(volumeRow)
+
+        // Mac volume slider + percentage; dragging sets the Mac's volume on release.
+        val sliderRow = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(0, 0, 0, dp(12))
+        }
+        macVolumeSeek = SeekBar(this).apply {
+            max = 100
+            isEnabled = false
+            progressTintList = ColorStateList.valueOf(Color.parseColor("#8F98FF"))
+            thumbTintList = ColorStateList.valueOf(Color.parseColor("#8F98FF"))
+            progressBackgroundTintList = ColorStateList.valueOf(Color.parseColor("#262B44"))
+            layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
+            setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
+                override fun onProgressChanged(bar: SeekBar, value: Int, fromUser: Boolean) {
+                    if (fromUser) macVolumeLabel.text = "$value%"
+                }
+                override fun onStartTrackingTouch(bar: SeekBar) { draggingMacVolume = true }
+                override fun onStopTrackingTouch(bar: SeekBar) {
+                    draggingMacVolume = false
+                    P2PDaemonService.sendMediaCommand("SET_VOLUME:${bar.progress}")
+                }
+            })
+        }
+        sliderRow.addView(TextView(this).apply {
+            text = "🔈"
+            textSize = 16f
+            setPadding(0, 0, dp(4), 0)
+        })
+        sliderRow.addView(macVolumeSeek)
+        macVolumeLabel = TextView(this).apply {
+            text = "—"
+            textSize = 14f
+            setTextColor(Color.parseColor("#A6ACC4"))
+            gravity = Gravity.END
+            minWidth = dp(64)
+        }
+        sliderRow.addView(macVolumeLabel)
+        mediaCard.addView(sliderRow)
 
         val mediaFooterDesc = TextView(this).apply {
             text = "💡 Controls any media on Mac (Apple Music, Spotify, YouTube, Podcasts, QuickTime). Media controls also appear live in your Android notification shade & lock screen."
