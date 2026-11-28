@@ -248,10 +248,13 @@ class MediaStoreProvider(private val context: Context) {
     fun startObserving(onChange: () -> Unit) {
         if (contentObserver != null) return
         val handler = android.os.Handler(android.os.Looper.getMainLooper())
+        // A batch delete from the Mac fires one change per item: report the burst once.
+        val notify = Runnable { onChange() }
         contentObserver = object : android.database.ContentObserver(handler) {
             override fun onChange(selfChange: Boolean) {
                 super.onChange(selfChange)
-                onChange()
+                handler.removeCallbacks(notify)
+                handler.postDelayed(notify, 500)
             }
         }
         try {
