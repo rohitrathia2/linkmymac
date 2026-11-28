@@ -204,6 +204,8 @@ class P2PDaemonService : Service() {
 
     private val running = AtomicBoolean(false)
     private val ioExecutor = Executors.newCachedThreadPool()
+    // Gallery downloads queue one at a time, so "Save 200 to Mac" doesn't open 200 streams at once.
+    private val mediaDownloadExecutor = Executors.newSingleThreadExecutor()
     private var serverSocket: ServerSocket? = null
     private var nsdManager: NsdManager? = null
     private var registrationListener: NsdManager.RegistrationListener? = null
@@ -294,6 +296,7 @@ class P2PDaemonService : Service() {
         activeClients.clear()
         onClientCountChanged?.invoke(0)
         ioExecutor.shutdownNow()
+        mediaDownloadExecutor.shutdownNow()
         super.onDestroy()
     }
 
@@ -706,7 +709,7 @@ class P2PDaemonService : Service() {
                     openForSending(mediaProvider.contentUriFor(mediaId))?.let { file ->
                         // Keep the Mac's media_<id>.<ext> naming so it recognises earlier downloads.
                         val named = file.copy(name = "$transferId.${file.name.substringAfterLast('.', "jpg")}")
-                        ioExecutor.execute { streamFile(transferId, named) }
+                        mediaDownloadExecutor.execute { streamFile(transferId, named) }
                     }
                 }
 

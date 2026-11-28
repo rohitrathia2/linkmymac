@@ -243,7 +243,7 @@ struct DashboardView: View {
     @State private var qrStatusMessage: String? = nil
     @State private var isCameraFlipping: Bool = false
     @State private var showDeleteConfirmation: Bool = false
-    @State private var itemPendingDeletion: RemoteMediaItem? = nil
+    @State private var itemsPendingDeletion: [RemoteMediaItem] = []
     @State private var previewMediaItem: RemoteMediaItem? = nil
     @State private var previewAutoplay: Bool = false
     @AppStorage("LinkMyMac.groupMediaByFolder") private var groupMediaByFolder = false
@@ -252,7 +252,7 @@ struct DashboardView: View {
     @State private var photoSearchText: String = ""
     @State private var showFaceTimeGuide: Bool = false
     @State private var showQRPairing = false
-    @State private var selectedMediaID: String?
+    @State private var selectedMediaIDs: Set<String> = []
 
     var body: some View {
         NavigationSplitView {
@@ -266,7 +266,7 @@ struct DashboardView: View {
         }
         .onChange(of: selectedTab) { // each section starts unfiltered, nothing selected
             photoSearchText = ""
-            selectedMediaID = nil
+            selectedMediaIDs = []
         }
         .sheet(isPresented: $showQRPairing) {
             qrPairingSheet
@@ -281,18 +281,17 @@ struct DashboardView: View {
             PhotoDetailPreviewSheet(item: item, p2pClient: p2pClient, autoplay: previewAutoplay)
         }
         .confirmationDialog(
-            itemPendingDeletion?.isVideo == true ? "Delete this video from your phone?" : "Delete this photo from your phone?",
+            deletionTitle,
             isPresented: $showDeleteConfirmation,
             titleVisibility: .visible
         ) {
             Button("Delete from Phone", role: .destructive) {
-                if let item = itemPendingDeletion {
-                    p2pClient.deleteMediaItem(mediaId: item.id)
-                    itemPendingDeletion = nil
-                }
+                for item in itemsPendingDeletion { p2pClient.deleteMediaItem(mediaId: item.id) }
+                selectedMediaIDs.subtract(itemsPendingDeletion.map(\.id))
+                itemsPendingDeletion = []
             }
             Button("Cancel", role: .cancel) {
-                itemPendingDeletion = nil
+                itemsPendingDeletion = []
             }
         } message: {
             Text("It’s removed from your phone’s storage for good.")
@@ -516,7 +515,8 @@ struct DashboardView: View {
         let loaded = p2pClient.mediaItems(kind).count
         let total = p2pClient.mediaTotals[kind]
         let noun = isVideos ? "video" : "photo"
-        let selected = items.first { $0.id == selectedMediaID }
+        let selection = items.filter { selectedMediaIDs.contains($0.id) }
+        let showsBar = !selection.isEmpty && (!isVideos || selection.count > 1) // one video uses the player's buttons
         return Group {
             if items.isEmpty {
                 EmptyStateView(symbol: isVideos ? "video" : "photo",
@@ -529,7 +529,7 @@ struct DashboardView: View {
             } else {
                 ScrollView {
                     VStack(alignment: .leading, spacing: 20) {
-                        if isVideos, let playing = selected ?? items.first {
+                        if isVideos, selection.count <= 1, let playing = selection.first ?? items.first {
                             nowPlaying(playing)
                         }
                         if groupMediaByFolder {
@@ -553,13 +553,14 @@ struct DashboardView: View {
                         }
                     }
                     .padding(.horizontal, 24).padding(.vertical, 20)
-                    .padding(.bottom, !isVideos && selected != nil ? 64 : 0) // room for the floating bar
+                    .padding(.bottom, showsBar ? 64 : 0) // room for the floating bar
                 }
                 .overlay(alignment: .bottom) {
-                    if !isVideos, let selected {
-                        selectionBar(selected).padding(.bottom, 18)
+                    if showsBar {
+                        selectionBar(selection, all: items, noun: noun).padding(.bottom, 18)
                     }
                 }
+                .onExitCommand { selectedMediaIDs = [] } // Esc clears the selection
             }
         }
         .navigationTitle(isVideos ? "Videos" : "Photos")
@@ -622,7 +623,7 @@ struct DashboardView: View {
 
     /// Thumbnail tile (Figma Mac/Media tile). Click selects, double-click opens.
     private func mediaTile(_ item: RemoteMediaItem) -> some View {
-        let selected = selectedMediaID == item.id
+        let selected = selectedMediaIDs.contains(item.id)
         return Color.clear
             .aspectRatio(item.isVideo ? 16.0 / 9.0 : 1, contentMode: .fit)
             .overlay {
@@ -675,28 +676,42 @@ struct DashboardView: View {
                 previewAutoplay = item.isVideo
                 previewMediaItem = item
             }
-            .onTapGesture { selectedMediaID = selected ? nil : item.id }
+            .onTapGesture { // click toggles, so several tiles can be selected
+                if selected { selectedMediaIDs.remove(item.id) } else { selectedMediaIDs.insert(item.id) }
+            }
             .contextMenu {
-                Button("Open") { previewAutoplay = false; previewMediaItem = item }
-                Button("Save to Mac") { p2pClient.downloadFullResolutionMedia(mediaId: item.id) }
-                Button("Share…") { shareMediaItem(item) }
+                // Right-clicking inside a multi-selection acts on all of it, like Finder.
+                let targets = selected && selectedMediaIDs.count > 1
+                    ? p2pClient.mediaItems.filter { selectedMediaIDs.contains($0.id) } : [item]
+                if targets.count == 1 {
+                    Button("Open") { previewAutoplay = false; previewMediaItem = item }
+                }
+                Button(targets.count == 1 ? "Save to Mac" : "Save \(targets.count) Items to Mac") { saveToMac(targets) }
+                if targets.count == 1 {
+                    Button("Share…") { shareMediaItem(item) }
+                }
                 Divider()
-                Button("Delete from Phone…", role: .destructive) { itemPendingDeletion = item; showDeleteConfirmation = true }
+                Button(targets.count == 1 ? "Delete from Phone…" : "Delete \(targets.count) Items from Phone…", role: .destructive) {
+                    confirmDelete(targets)
+                }
             }
             .help(item.displayName)
     }
 
-    /// Floating actions for the selected photo (Figma: Selection bar).
-    private func selectionBar(_ item: RemoteMediaItem) -> some View {
+    /// Floating actions for the selected items (Figma: Selection bar).
+    private func selectionBar(_ selection: [RemoteMediaItem], all items: [RemoteMediaItem], noun: String) -> some View {
         HStack(spacing: 4) {
-            Text("1 selected").font(.lmHeadline).foregroundStyle(Theme.textPrimary).padding(.leading, 10)
-            Rectangle().fill(Theme.textTertiary.opacity(0.35)).frame(width: 1, height: 20).padding(.horizontal, 6)
-            barButton("arrow.down.to.line", "Save to Mac") { p2pClient.downloadFullResolutionMedia(mediaId: item.id) }
-            barButton("square.and.arrow.up", "Share…") { shareMediaItem(item) }
-            barButton("trash", "Delete from phone", tint: Theme.danger) {
-                itemPendingDeletion = item
-                showDeleteConfirmation = true
+            Text("\(selection.count) selected").font(.lmHeadline).foregroundStyle(Theme.textPrimary).padding(.leading, 10)
+            if selection.count < items.count {
+                barButton("checkmark.circle", "Select all") { selectedMediaIDs.formUnion(items.map(\.id)) }
             }
+            Rectangle().fill(Theme.textTertiary.opacity(0.35)).frame(width: 1, height: 20).padding(.horizontal, 6)
+            barButton("arrow.down.to.line", "Save to Mac") { saveToMac(selection) }
+            if selection.count == 1 {
+                barButton("square.and.arrow.up", "Share…") { shareMediaItem(selection[0]) }
+            }
+            barButton("trash", "Delete from phone", tint: Theme.danger) { confirmDelete(selection) }
+            IconButton(symbol: "xmark", help: "Clear selection (Esc)") { selectedMediaIDs = [] }
         }
         .padding(6)
         .background(Theme.surface, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
@@ -730,7 +745,7 @@ struct DashboardView: View {
                         .disabled(mediaDownload(for: item) != nil || p2pClient.localFileURL(for: item.id) != nil)
                     Button("Share…") { shareMediaItem(item) }
                         .buttonStyle(LMButtonStyle(kind: .secondary, fullWidth: true))
-                    Button("Delete from phone") { itemPendingDeletion = item; showDeleteConfirmation = true }
+                    Button("Delete from phone") { confirmDelete([item]) }
                         .buttonStyle(LMButtonStyle(kind: .destructive, fullWidth: true))
                 }
                 Spacer(minLength: 0)
@@ -1296,6 +1311,24 @@ struct DashboardView: View {
     /// "1:05" or "1:02:03"
     private func formatDuration(_ ms: Int64) -> String {
         Duration.milliseconds(ms).formatted(.time(pattern: ms >= 3_600_000 ? .hourMinuteSecond : .minuteSecond))
+    }
+
+    /// Queues a download for each item not already saved or on its way.
+    private func saveToMac(_ items: [RemoteMediaItem]) {
+        for item in items where mediaDownload(for: item) == nil && p2pClient.localFileURL(for: item.id) == nil {
+            p2pClient.downloadFullResolutionMedia(mediaId: item.id)
+        }
+    }
+
+    private func confirmDelete(_ items: [RemoteMediaItem]) {
+        itemsPendingDeletion = items
+        showDeleteConfirmation = true
+    }
+
+    private var deletionTitle: String {
+        let items = itemsPendingDeletion
+        let noun = items.allSatisfy(\.isVideo) ? "video" : items.allSatisfy { !$0.isVideo } ? "photo" : "item"
+        return items.count == 1 ? "Delete this \(noun) from your phone?" : "Delete \(items.count) \(noun)s from your phone?"
     }
 
     /// The in-flight download of a gallery item, if any (media downloads reuse the file transfer list).

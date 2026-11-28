@@ -56,6 +56,7 @@ receiver → FILE_TRANSFER_RESULT   {transferId, ok, error?}
 - Senders wait for the socket to take each chunk (backpressure), so any file size streams in constant memory.
 - The phone saves to `Download/LinkMyMac` through MediaStore. The Mac saves to `~/Downloads` and never overwrites (`name (1).ext`). Both sides reduce incoming names to a plain file name.
 - Gallery downloads reuse this: the Mac sends `MEDIA_DOWNLOAD_REQUEST {mediaId, transferId: "media_<id>"}`, and the phone answers with the frames above and the name `media_<id>.<ext>`.
+- Multi-select on the Mac sends one `MEDIA_DOWNLOAD_REQUEST` or `MEDIA_DELETE_REQUEST` per item. The phone streams gallery downloads one at a time and coalesces the resulting MediaStore changes into a single `MEDIA_GALLERY_UPDATED` (500 ms debounce).
 
 ## 4b. Video streaming (byte ranges)
 ```
